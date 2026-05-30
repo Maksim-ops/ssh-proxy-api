@@ -1,0 +1,77 @@
+globalPolicies:
+  - name: allow-df-h
+    command: df
+    allowedArgv:
+      - ["-h"]
+
+  - name: allow-uptime
+    command: uptime
+    allowedArgv:
+      - []
+
+  - name: allow-whoami
+    command: whoami
+    allowedArgv:
+      - []
+
+servers:
+  lifeorient:
+    sshHost: lifeorient
+    commandTimeoutSeconds: 60
+    policies:
+      - name: allow-ls-paths
+        command: ls
+        allowedFlags:
+          - "-l"
+          - "-a"
+          - "-h"
+          - "-la"
+          - "-al"
+          - "-lh"
+          - "-hl"
+          - "-lah"
+          - "-lha"
+          - "-alh"
+          - "-ahl"
+        flagsPosition: anywhere
+        pathArgs:
+          min: 0
+          max: 2
+          allowAbsolute: true
+          allowRelative: true
+          allowGlobs: false
+          allowParentTraversal: false
+
+          # Если allowRegex пустой или отсутствует,
+          # значит разрешены любые пути, кроме deny.
+          # allowRegex:
+          #   - "^/tmp(/.*)?$"
+          #   - "^/var/log(/.*)?$"
+          #   - "^[A-Za-z0-9._/@+-]+$"
+
+          denyPrefixes:
+            - "/root/.ssh"
+            - "/proc"
+            - "/sys"
+            - "/dev"
+
+          denyRegex:
+            - "^/etc/shadow$"
+
+      # На будущее, когда будете тестировать kubectl
+      - name: allow-kubectl-get-basic
+        command: kubectl
+        subcommands: ["get"]
+        resources:
+          - pods
+          - pod
+          - deployments
+          - deployment
+          - services
+          - service
+          - nodes
+          - node
+          - events
+          - namespaces
+          - namespace
+        allowNamespaces: ["*"]

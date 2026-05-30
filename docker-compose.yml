@@ -1,0 +1,18 @@
+services:
+  pctl-proxy:
+    build: .
+    container_name: pctl-proxy
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      #- ./ssh:/home/appuser/.ssh:ro
+      - /home/maksim/.ssh_proxy:/home/appuser/.ssh:ro
+      - ./config:/etc/pctl:ro
+    environment:
+      - PCTL_SSH_HOST=lifeorient
+      - PCTL_API_TOKEN=dev-local-token-change-me
+      - PCTL_SSH_CONFIG=/home/appuser/.ssh/config
+      - PCTL_CONFIG=/etc/pctl/config.yml
+      - PCTL_SSH_KNOWN_HOSTS=/home/appuser/.ssh/known_hosts
+      - PCTL_COMMAND_TIMEOUT_SECONDS=60
+    restart: unless-stopped
