@@ -3,14 +3,89 @@
 import os
 import sys
 import json
+import uuid
 import argparse
 import urllib.parse
 import urllib.request
 import urllib.error
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 
 DEFAULT_PROXY_URL = "http://127.0.0.1:8080"
+DEFAULT_STATE_FILE = "~/.config/pctl/state.json"
+
+
+def get_state_file() -> Path:
+    return Path(os.getenv("PCTL_STATE_FILE", DEFAULT_STATE_FILE)).expanduser()
+
+
+def load_state() -> Dict[str, Any]:
+    path = get_state_file()
+
+    if not path.exists():
+        return {}
+
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_state(state: Dict[str, Any]) -> None:
+    path = get_state_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def get_active_server_from_state() -> Optional[str]:
+    state = load_state()
+    value = state.get("active_server")
+
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+
+    return None
+
+
+def set_active_server(server: str) -> None:
+    state = load_state()
+    state["active_server"] = server
+    save_state(state)
+
+
+def resolve_server_value(explicit_server: Optional[str] = None) -> Optional[str]:
+    """
+    Приоритет:
+      1. explicit --server
+      2. PCTL_SERVER
+      3. state file
+      4. PCTL_DEFAULT_SSH_HOST
+      5. PCTL_DEFAULT_SERVER
+    """
+
+    if explicit_server:
+        return explicit_server
+
+    if os.getenv("PCTL_SERVER"):
+        return os.getenv("PCTL_SERVER")
+
+    active = get_active_server_from_state()
+
+    if active:
+        return active
+
+    if os.getenv("PCTL_DEFAULT_SSH_HOST"):
+        return os.getenv("PCTL_DEFAULT_SSH_HOST")
+
+    return os.getenv("PCTL_DEFAULT_SERVER")
+
+
+def resolve_server(args) -> Optional[str]:
+    return resolve_server_value(getattr(args, "server", None))
 
 
 def eprint(*args, **kwargs):
@@ -230,11 +305,14 @@ def handle_admin_response(
     return exit_code_for_proxy_error(status, resp)
 
 
-def require_server(server: Optional[str]) -> str:
+def require_server(args) -> str:
+    server = resolve_server(args)
+
     if not server:
         eprint(
-            "pctl: server is required. Use --server <name> "
-            "or set PCTL_DEFAULT_SERVER/PCTL_SERVER."
+            "pctl: server is required. Use --server <name>, "
+            "or run `pctl switch <server>`, "
+            "or set PCTL_SERVER/PCTL_DEFAULT_SSH_HOST/PCTL_DEFAULT_SERVER."
         )
         sys.exit(2)
 
@@ -253,7 +331,7 @@ def require_token(token: Optional[str]) -> str:
 
 
 def cmd_connect(args) -> int:
-    server = require_server(args.server)
+    server = require_server(args)
     token = require_token(args.token)
 
     status, resp = http_json(
@@ -274,7 +352,7 @@ def cmd_connect(args) -> int:
 
 
 def cmd_disconnect(args) -> int:
-    server = require_server(args.server)
+    server = require_server(args)
     token = require_token(args.token)
 
     status, resp = http_json(
@@ -294,8 +372,136 @@ def cmd_disconnect(args) -> int:
     )
 
 
+def cmd_servers(args) -> int:
+    token = require_token(args.token)
+
+    status, resp = http_json(
+        proxy_url=args.proxy_url,
+        method="GET",
+        path="/api/v1/servers",
+        token=token,
+        timeout=args.timeout,
+    )
+
+    if args.json:
+        print_json_response(resp)
+
+        if 200 <= status < 300 and resp.get("ok", True) is not False:
+            return 0
+
+        return exit_code_for_proxy_error(status, resp)
+
+    if not (200 <= status < 300) or resp.get("ok") is False:
+        print_error_response(resp)
+        return exit_code_for_proxy_error(status, resp)
+
+    servers = resp.get("servers") or []
+    active = resolve_server(args)
+
+    for item in servers:
+        name = item.get("server")
+        ssh_host = item.get("ssh_host")
+        connected = item.get("connected")
+
+        marker = "*" if active and name == active else " "
+
+        print(f"{marker} {name}\tssh_host={ssh_host}\tconnected={connected}")
+
+    return 0
+
+
+def cmd_active(args) -> int:
+    server = resolve_server(args)
+
+    if args.json:
+        print_json_response(
+            {
+                "ok": True,
+                "active_server": server,
+                "state_file": str(get_state_file()),
+                "arg_server": getattr(args, "server", None),
+                "env_PCTL_SERVER": os.getenv("PCTL_SERVER"),
+                "env_PCTL_DEFAULT_SSH_HOST": os.getenv("PCTL_DEFAULT_SSH_HOST"),
+                "env_PCTL_DEFAULT_SERVER": os.getenv("PCTL_DEFAULT_SERVER"),
+                "state_active_server": get_active_server_from_state(),
+            }
+        )
+        return 0
+
+    if server:
+        print(f"active server: {server}")
+    else:
+        print("active server: <not set>")
+
+    print(f"state file: {get_state_file()}")
+
+    if getattr(args, "server", None):
+        print("source: --server")
+    elif os.getenv("PCTL_SERVER"):
+        print("source: PCTL_SERVER")
+    elif get_active_server_from_state():
+        print("source: state")
+    elif os.getenv("PCTL_DEFAULT_SSH_HOST"):
+        print("source: PCTL_DEFAULT_SSH_HOST")
+    elif os.getenv("PCTL_DEFAULT_SERVER"):
+        print("source: PCTL_DEFAULT_SERVER")
+    else:
+        print("source: none")
+
+    return 0
+
+
+def cmd_switch(args) -> int:
+    server = args.target_server.strip()
+
+    if not server:
+        eprint("pctl: switch requires server name")
+        return 2
+
+    set_active_server(server)
+
+    if args.json:
+        print_json_response(
+            {
+                "ok": True,
+                "active_server": server,
+                "state_file": str(get_state_file()),
+            }
+        )
+    else:
+        print(f"active server switched to: {server}")
+        print(f"state file: {get_state_file()}")
+
+    return 0
+
+
+def cmd_cancel(args) -> int:
+    token = require_token(args.token)
+
+    status, resp = http_json(
+        proxy_url=args.proxy_url,
+        method="POST",
+        path="/api/v1/cancel",
+        token=token,
+        body={"request_id": args.request_id},
+        timeout=args.timeout,
+    )
+
+    if args.json:
+        print_json_response(resp)
+    elif 200 <= status < 300 and resp.get("ok") is True:
+        print(f"cancelled: request_id={args.request_id} message={resp.get('message')}")
+    else:
+        print_error_response(resp)
+
+    if 200 <= status < 300 and resp.get("ok", True) is not False:
+        return 0
+
+    return exit_code_for_proxy_error(status, resp)
+
+
 def cmd_status(args) -> int:
-    server = require_server(args.server)
+    server = require_server(args)
     token = require_token(args.token)
 
     status, resp = http_json(
@@ -316,7 +522,7 @@ def cmd_status(args) -> int:
 
 
 def cmd_exec(args) -> int:
-    server = require_server(args.server)
+    server = require_server(args)
     token = require_token(args.token)
 
     argv = args.argv or []
@@ -329,17 +535,42 @@ def cmd_exec(args) -> int:
         eprint("example: pctl --server lifeorient exec -- df -h")
         return 2
 
-    status, resp = http_json(
-        proxy_url=args.proxy_url,
-        method="POST",
-        path="/api/v1/exec",
-        token=token,
-        body={
-            "server": server,
-            "argv": argv,
-        },
-        timeout=args.timeout,
-    )
+    request_id = str(uuid.uuid4())
+
+    try:
+        status, resp = http_json(
+            proxy_url=args.proxy_url,
+            method="POST",
+            path="/api/v1/exec",
+            token=token,
+            body={
+                "request_id": request_id,
+                "server": server,
+                "argv": argv,
+            },
+            timeout=args.timeout,
+        )
+    except KeyboardInterrupt:
+        eprint(f"pctl: interrupted, sending cancel request_id={request_id}")
+
+        try:
+            cancel_status, cancel_resp = http_json(
+                proxy_url=args.proxy_url,
+                method="POST",
+                path="/api/v1/cancel",
+                token=token,
+                body={"request_id": request_id},
+                timeout=10,
+            )
+
+            if 200 <= cancel_status < 300 and cancel_resp.get("ok") is True:
+                eprint(f"pctl: remote command cancelled: {cancel_resp.get('message')}")
+            else:
+                eprint(f"pctl: cancel failed: {cancel_resp.get('message')}")
+        except Exception as exc:
+            eprint(f"pctl: cancel request failed: {exc}")
+
+        return 130
 
     return handle_exec_response(
         status=status,
@@ -356,8 +587,12 @@ def main_pctl(argv) -> int:
 
     parser.add_argument(
         "--server",
-        default=os.getenv("PCTL_SERVER") or os.getenv("PCTL_DEFAULT_SERVER"),
-        help="Server name from proxy config. Env: PCTL_SERVER or PCTL_DEFAULT_SERVER.",
+        default=None,
+        help=(
+            "Server name from proxy config. "
+            "Priority: --server, PCTL_SERVER, active state, "
+            "PCTL_DEFAULT_SSH_HOST, PCTL_DEFAULT_SERVER."
+        ),
     )
 
     parser.add_argument(
@@ -403,6 +638,20 @@ def main_pctl(argv) -> int:
     p_exec.add_argument("argv", nargs=argparse.REMAINDER)
     p_exec.set_defaults(func=cmd_exec)
 
+    p_servers = subparsers.add_parser("servers", help="List configured servers")
+    p_servers.set_defaults(func=cmd_servers)
+
+    p_active = subparsers.add_parser("active", help="Show active server")
+    p_active.set_defaults(func=cmd_active)
+
+    p_switch = subparsers.add_parser("switch", help="Switch active server")
+    p_switch.add_argument("target_server")
+    p_switch.set_defaults(func=cmd_switch)
+
+    p_cancel = subparsers.add_parser("cancel", help="Cancel running command by request_id")
+    p_cancel.add_argument("request_id")
+    p_cancel.set_defaults(func=cmd_cancel)
+
     args = parser.parse_args(argv)
 
     args.proxy_url = normalize_proxy_url(args.proxy_url)
@@ -422,22 +671,30 @@ def main_kubectl_shim(argv) -> int:
 
       POST /api/v1/exec
       {
-        "server": "$PCTL_DEFAULT_SERVER",
+        "server": "<resolved server>",
         "argv": ["kubectl", "get", "pods", "-n", "default"]
       }
+
+    Server выбирается по приоритету:
+      1. PCTL_SERVER
+      2. active server из ~/.config/pctl/state.json
+      3. PCTL_DEFAULT_SSH_HOST
+      4. PCTL_DEFAULT_SERVER
     """
 
-    server = os.getenv("PCTL_SERVER") or os.getenv("PCTL_DEFAULT_SERVER")
-    proxy_url = normalize_proxy_url(os.getenv("PCTL_PROXY_URL", DEFAULT_PROXY_URL))
-    token = os.getenv("PCTL_API_TOKEN")
-    timeout = int(os.getenv("PCTL_HTTP_TIMEOUT", "300"))
+    server = resolve_server_value()
 
     if not server:
         eprint(
             "kubectl shim: server is required. "
-            "Set PCTL_DEFAULT_SERVER or PCTL_SERVER."
+            "Set PCTL_SERVER/PCTL_DEFAULT_SSH_HOST/PCTL_DEFAULT_SERVER "
+            "or run `pctl switch <server>`."
         )
         return 2
+
+    proxy_url = normalize_proxy_url(os.getenv("PCTL_PROXY_URL", DEFAULT_PROXY_URL))
+    token = os.getenv("PCTL_API_TOKEN")
+    timeout = int(os.getenv("PCTL_HTTP_TIMEOUT", "300"))
 
     if not token:
         eprint(
@@ -446,19 +703,50 @@ def main_kubectl_shim(argv) -> int:
         )
         return 2
 
+    request_id = str(uuid.uuid4())
+
     remote_argv = ["kubectl"] + argv
 
-    status, resp = http_json(
-        proxy_url=proxy_url,
-        method="POST",
-        path="/api/v1/exec",
-        token=token,
-        body={
-            "server": server,
-            "argv": remote_argv,
-        },
-        timeout=timeout,
-    )
+    try:
+        status, resp = http_json(
+            proxy_url=proxy_url,
+            method="POST",
+            path="/api/v1/exec",
+            token=token,
+            body={
+                "request_id": request_id,
+                "server": server,
+                "argv": remote_argv,
+            },
+            timeout=timeout,
+        )
+    except KeyboardInterrupt:
+        eprint(f"kubectl shim: interrupted, sending cancel request_id={request_id}")
+
+        try:
+            cancel_status, cancel_resp = http_json(
+                proxy_url=proxy_url,
+                method="POST",
+                path="/api/v1/cancel",
+                token=token,
+                body={"request_id": request_id},
+                timeout=10,
+            )
+
+            if 200 <= cancel_status < 300 and cancel_resp.get("ok") is True:
+                eprint(
+                    f"kubectl shim: remote command cancelled: "
+                    f"{cancel_resp.get('message')}"
+                )
+            else:
+                eprint(
+                    f"kubectl shim: cancel failed: "
+                    f"{cancel_resp.get('message')}"
+                )
+        except Exception as exc:
+            eprint(f"kubectl shim: cancel request failed: {exc}")
+
+        return 130
 
     as_json = os.getenv("PCTL_OUTPUT", "").lower() == "json"
 
@@ -479,4 +767,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        eprint("pctl: interrupted")
+        sys.exit(130)

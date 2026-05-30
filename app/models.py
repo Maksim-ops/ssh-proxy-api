@@ -8,6 +8,10 @@ class ExecRequest(BaseModel):
     server: str
     argv: List[str] = Field(..., min_length=1)
 
+    # Может быть сгенерирован wrapper'ом заранее.
+    # Это нужно для cancel по Ctrl-C.
+    request_id: Optional[str] = None
+
 
 class ExecResponse(BaseModel):
     ok: bool
@@ -29,6 +33,10 @@ class ExecResponse(BaseModel):
 
 class ServerRequest(BaseModel):
     server: str
+
+
+class CancelRequest(BaseModel):
+    request_id: str
 
 
 @dataclass

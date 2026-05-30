@@ -1,10 +1,19 @@
 import asyncio
-from typing import Optional, Dict, Any
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List
 
 import asyncssh
 
 from .settings import SSH_CONFIG, SSH_KNOWN_HOSTS
 from .config import get_server_config
+from .running import register_running_command, unregister_running_command
+
+
+@dataclass
+class SSHRunResult:
+    stdout: str
+    stderr: str
+    exit_status: Optional[int]
 
 
 class SSHManager:
@@ -12,10 +21,7 @@ class SSHManager:
         self.server_name = server_name
         self.server_cfg = server_cfg
 
-        # sshHost — это Host alias из /home/appuser/.ssh/config.
-        # Если sshHost не указан, используем имя server из API.
         self.ssh_host = server_cfg.get("sshHost", server_name)
-
         self.command_timeout = int(server_cfg.get("commandTimeoutSeconds", 60))
 
         self._conn: Optional[asyncssh.SSHClientConnection] = None
@@ -74,21 +80,81 @@ class SSHManager:
     def is_connected(self) -> bool:
         return self._conn is not None
 
-    async def run(self, command: str) -> asyncssh.SSHCompletedProcess:
+    async def _terminate_process(self, process: asyncssh.SSHClientProcess) -> None:
+        try:
+            process.terminate()
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                return
+
+        try:
+            await asyncio.wait_for(process.wait(), timeout=3)
+            return
+        except asyncio.TimeoutError:
+            pass
+        except Exception:
+            return
+
+        try:
+            process.kill()
+            await asyncio.wait_for(process.wait(), timeout=3)
+        except Exception:
+            pass
+
+    async def run(
+        self,
+        *,
+        command: str,
+        request_id: str,
+        argv: List[str],
+    ) -> SSHRunResult:
+        """
+        Выполняет команду через create_process(), чтобы её можно было отменить
+        через /api/v1/cancel.
+        """
+
         last_error: Optional[Exception] = None
 
         for attempt in [1, 2]:
+            process = None
+
             try:
                 await self.connect()
 
                 assert self._conn is not None
 
-                result = await asyncio.wait_for(
-                    self._conn.run(command, check=False),
-                    timeout=self.command_timeout,
+                process = await self._conn.create_process(command)
+
+                await register_running_command(
+                    request_id=request_id,
+                    server=self.server_name,
+                    argv=argv,
+                    remote_command=command,
+                    process=process,
                 )
 
-                return result
+                try:
+                    stdout, stderr = await asyncio.wait_for(
+                        process.communicate(),
+                        timeout=self.command_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    await self._terminate_process(process)
+                    raise TimeoutError(
+                        f"command timeout after {self.command_timeout} seconds"
+                    )
+
+                return SSHRunResult(
+                    stdout=stdout or "",
+                    stderr=stderr or "",
+                    exit_status=process.exit_status,
+                )
+
+            except TimeoutError:
+                await unregister_running_command(request_id)
+                raise
 
             except Exception as exc:
                 last_error = exc
@@ -106,13 +172,19 @@ class SSHManager:
                 if attempt == 2:
                     break
 
+            finally:
+                await unregister_running_command(request_id)
+
         raise RuntimeError(f"SSH command failed after reconnect: {last_error}")
 
 
 ssh_managers: Dict[str, SSHManager] = {}
 
 
-def get_ssh_manager(server: str, server_cfg: Optional[Dict[str, Any]] = None) -> SSHManager:
+def get_ssh_manager(
+    server: str,
+    server_cfg: Optional[Dict[str, Any]] = None,
+) -> SSHManager:
     if server not in ssh_managers:
         if server_cfg is None:
             server_cfg = get_server_config(server)

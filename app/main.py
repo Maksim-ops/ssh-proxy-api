@@ -8,7 +8,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .settings import CONFIG_PATH, API_TOKEN
-from .models import ExecRequest, ExecResponse, ServerRequest
+from .models import ExecRequest, ExecResponse, ServerRequest, CancelRequest
+from .running import cancel_running_command, list_running_commands
 from .errors import make_error_body
 from .auth import require_auth
 from .config import (
@@ -204,7 +205,7 @@ async def exec_command(
     request: Request,
     _: None = Depends(require_auth),
 ):
-    request_id = str(uuid.uuid4())
+    request_id = req.request_id or str(uuid.uuid4())
     started_at = time.monotonic()
 
     server_cfg = get_server_config(req.server, request_id=request_id)
@@ -275,7 +276,11 @@ async def exec_command(
 
     # 3. Execute over SSH
     try:
-        result = await manager.run(remote_command)
+        result = await manager.run(
+          command=remote_command,
+          request_id=request_id,
+          argv=req.argv,
+        )
     except Exception as exc:
         duration_ms = int((time.monotonic() - started_at) * 1000)
 
@@ -358,3 +363,62 @@ async def exec_command(
         duration_ms=duration_ms,
         policy=decision.policy,
     )
+
+@app.get("/api/v1/running")
+async def running_commands(
+    _: None = Depends(require_auth),
+):
+    return {
+        "ok": True,
+        "running": await list_running_commands(),
+    }
+
+
+@app.post("/api/v1/cancel")
+async def cancel_command(
+    req: CancelRequest,
+    request: Request,
+    _: None = Depends(require_auth),
+):
+    ok, message, item = await cancel_running_command(req.request_id)
+
+    if not ok:
+        await write_audit_event(
+            {
+                "event": "cancel",
+                "request_id": req.request_id,
+                "decision": "not_found_or_error",
+                "message": message,
+                "client": request.client.host if request.client else None,
+            }
+        )
+
+        return JSONResponse(
+            status_code=404,
+            content=make_error_body(
+                error="cancel_failed",
+                message=message,
+                request_id=req.request_id,
+            ),
+        )
+
+    await write_audit_event(
+        {
+            "event": "cancel",
+            "request_id": req.request_id,
+            "server": item.server if item else None,
+            "argv": item.argv if item else [],
+            "remote_command": item.remote_command if item else None,
+            "decision": "ok",
+            "message": message,
+            "client": request.client.host if request.client else None,
+        }
+    )
+
+    return {
+        "ok": True,
+        "request_id": req.request_id,
+        "message": message,
+        "server": item.server if item else None,
+        "argv": item.argv if item else [],
+    }
