@@ -863,11 +863,220 @@ ls /no-such-dir
 
 ---
 
+## CLI wrapper `pctl`
+
+`pctl` — локальный CLI-wrapper, который отправляет команды в `pctl-proxy` через HTTP API.
+
+Схема:
+
+```text
+pctl CLI
+  -> HTTP REST API
+    -> pctl-proxy
+      -> policy check
+        -> SSH
+          -> remote server
+```
+
+### Установка
+
+```bash
+sudo install -m 755 wrapper/pctl.py /usr/local/bin/pctl
+```
+
+Проверка:
+
+```bash
+pctl --help
+```
+
+---
+
+## Environment variables
+
+```bash
+export PCTL_PROXY_URL=http://127.0.0.1:8080
+export PCTL_API_TOKEN=dev-local-token-change-me
+```
+
+Для server по умолчанию можно использовать:
+
+```bash
+export PCTL_DEFAULT_SSH_HOST=lifeorient
+```
+
+или старое имя:
+
+```bash
+export PCTL_DEFAULT_SERVER=lifeorient
+```
+
+Приоритет выбора server:
+
+```text
+1. --server
+2. PCTL_SERVER
+3. active server из ~/.config/pctl/state.json
+4. PCTL_DEFAULT_SSH_HOST
+5. PCTL_DEFAULT_SERVER
+```
+
+---
+
+## Список серверов
+
+```bash
+pctl servers
+```
+
+Пример:
+
+```text
+* lifeorient    ssh_host=lifeorient    connected=True
+  prod-master-1 ssh_host=prod-master-1 connected=False
+```
+
+`*` означает текущий active server.
+
+---
+
+## Active server
+
+Показать текущий active server:
+
+```bash
+pctl active
+```
+
+Переключить active server:
+
+```bash
+pctl switch lifeorient
+```
+
+После этого можно не указывать `--server`:
+
+```bash
+pctl status
+pctl exec -- df -h
+```
+
+---
+
+## SSH connect/status/disconnect
+
+```bash
+pctl connect
+pctl status
+pctl disconnect
+```
+
+Или явно:
+
+```bash
+pctl --server lifeorient connect
+pctl --server lifeorient status
+pctl --server lifeorient disconnect
+```
+
+---
+
+## Выполнение команды
+
+```bash
+pctl exec -- df -h
+```
+
+Или явно:
+
+```bash
+pctl --server lifeorient exec -- df -h
+```
+
+Wrapper печатает `stdout` удалённой команды в локальный `stdout`, `stderr` — в локальный `stderr`, и возвращает `exit_code` удалённой команды.
+
+---
+
+## JSON mode
+
+```bash
+pctl --json exec -- df -h
+```
+
+Вернёт полный JSON-ответ proxy.
+
+---
+
+## Запрещённая команда
+
+```bash
+pctl exec -- rm -f test.txt
+```
+
+Пример:
+
+```text
+pctl: command_denied: command is not allowed by policy
+pctl: request_id=...
+```
+
+---
+
+## Cancel / Ctrl-C
+
+Wrapper генерирует `request_id` перед запуском команды.
+
+Если во время выполнения нажать `Ctrl-C`, wrapper отправит:
+
+```http
+POST /api/v1/cancel
+```
+
+Пример:
+
+```bash
+pctl exec -- sleep 100
+```
+
+Нажать:
+
+```text
+Ctrl-C
+```
+
+Ожидаемый вывод:
+
+```text
+pctl: interrupted, sending cancel request_id=...
+pctl: remote command cancelled: terminated
+```
+
+Также можно отменить команду вручную:
+
+```bash
+pctl cancel <request_id>
+```
+
+---
+
+## Важно про cancel
+
+Cancel работает для команд, запущенных через новую реализацию `asyncssh.create_process()`.
+
+Команда отменяется через:
+
+```text
+terminate -> wait -> kill
+```
+
+Для сложных команд, которые порождают дочерние процессы на удалённой стороне, может потребоваться более строгая production-реализация с process group/session handling.
+
+---
+
 ## 24. Текущие ограничения MVP
 
 На текущем этапе:
 
-- нет CLI-wrapper `pctl`;
 - нет UI;
 - нет audit log в файл;
 - нет ротации логов;
