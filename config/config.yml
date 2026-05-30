@@ -1,4 +1,13 @@
+limits:
+  maxStdoutBytes: 10485760   # 10 MB
+  maxStderrBytes: 1048576    # 1 MB
+
 globalPolicies:
+  - name: allow-sleep-100
+    command: sleep
+    allowedArgv:
+      - ["100"]
+
   - name: allow-df-h
     command: df
     allowedArgv:
@@ -17,7 +26,7 @@ globalPolicies:
 servers:
   lifeorient:
     sshHost: lifeorient
-    commandTimeoutSeconds: 60
+    commandTimeoutSeconds: 120
     policies:
       - name: allow-ls-paths
         command: ls

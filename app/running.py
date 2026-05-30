@@ -15,7 +15,23 @@ class RunningCommand:
 
 
 _running: Dict[str, RunningCommand] = {}
+_cancel_requested: Dict[str, float] = {}
 _lock = asyncio.Lock()
+
+
+async def request_cancel(request_id: str) -> None:
+    async with _lock:
+        _cancel_requested[request_id] = time.monotonic()
+
+
+async def clear_cancel_request(request_id: str) -> None:
+    async with _lock:
+        _cancel_requested.pop(request_id, None)
+
+
+async def is_cancel_requested(request_id: str) -> bool:
+    async with _lock:
+        return request_id in _cancel_requested
 
 
 async def register_running_command(
@@ -25,8 +41,20 @@ async def register_running_command(
     argv: List[str],
     remote_command: str,
     process: Any,
-) -> None:
+) -> bool:
+    """
+    Регистрирует running command.
+
+    Возвращает:
+      True  - команда зарегистрирована;
+      False - cancel уже был запрошен до регистрации.
+
+    Если False, вызывающий код должен немедленно остановить process.
+    """
     async with _lock:
+        if request_id in _cancel_requested:
+            return False
+
         _running[request_id] = RunningCommand(
             request_id=request_id,
             server=server,
@@ -36,10 +64,13 @@ async def register_running_command(
             started_at=time.monotonic(),
         )
 
+        return True
+
 
 async def unregister_running_command(request_id: str) -> None:
     async with _lock:
         _running.pop(request_id, None)
+        _cancel_requested.pop(request_id, None)
 
 
 async def get_running_command(request_id: str) -> Optional[RunningCommand]:
@@ -67,35 +98,64 @@ async def cancel_running_command(
     request_id: str,
     grace_seconds: float = 3.0,
 ) -> tuple[bool, str, Optional[RunningCommand]]:
-    item = await get_running_command(request_id)
+    """
+    Пытается отменить команду.
 
-    if item is None:
-        return False, "running command not found", None
+    Варианты:
+      - running command найден: terminate -> wait -> kill -> wait
+      - running command не найден: записываем pending cancel
+
+    Возвращает:
+      (ok, message, running_command)
+    """
+
+    async with _lock:
+        item = _running.get(request_id)
+
+        if item is None:
+            _cancel_requested[request_id] = time.monotonic()
+            return True, "cancel requested before command was sent", None
 
     process = item.process
 
+    # 1. Сначала мягко просим процесс завершиться
     try:
         process.terminate()
     except Exception:
+        # Если terminate не сработал, пробуем сразу kill
         try:
             process.kill()
         except Exception as exc:
-            return False, f"failed to terminate process: {exc}", item
+            return False, f"failed to terminate or kill process: {exc}", item
 
+        try:
+            await asyncio.wait_for(process.wait(), timeout=grace_seconds)
+            return True, "killed", item
+        except asyncio.TimeoutError:
+            return True, "kill signal sent but process did not confirm exit", item
+        except Exception as exc:
+            return True, f"kill signal sent, wait failed: {exc}", item
+
+    # 2. Ждём после terminate
     try:
         await asyncio.wait_for(process.wait(), timeout=grace_seconds)
         return True, "terminated", item
     except asyncio.TimeoutError:
-        try:
-            process.kill()
-        except Exception as exc:
-            return False, f"failed to kill process after timeout: {exc}", item
-
-        try:
-            await asyncio.wait_for(process.wait(), timeout=grace_seconds)
-        except Exception:
-            pass
-
-        return True, "killed", item
+        pass
     except Exception as exc:
-        return False, f"cancel failed: {exc}", item
+        return False, f"cancel failed while waiting after terminate: {exc}", item
+
+    # 3. Если terminate не помог, делаем kill
+    try:
+        process.kill()
+    except Exception as exc:
+        return False, f"failed to kill process after timeout: {exc}", item
+
+    # 4. Ждём после kill
+    try:
+        await asyncio.wait_for(process.wait(), timeout=grace_seconds)
+        return True, "killed", item
+    except asyncio.TimeoutError:
+        return True, "kill signal sent but process did not confirm exit", item
+    except Exception as exc:
+        return True, f"kill signal sent, wait failed: {exc}", item

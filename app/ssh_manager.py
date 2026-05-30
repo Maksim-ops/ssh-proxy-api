@@ -6,8 +6,11 @@ import asyncssh
 
 from .settings import SSH_CONFIG, SSH_KNOWN_HOSTS
 from .config import get_server_config
-from .running import register_running_command, unregister_running_command
-
+from .running import (
+    register_running_command,
+    unregister_running_command,
+    is_cancel_requested,
+)
 
 @dataclass
 class SSHRunResult:
@@ -125,15 +128,23 @@ class SSHManager:
 
                 assert self._conn is not None
 
-                process = await self._conn.create_process(command)
+                if await is_cancel_requested(request_id):
+                    raise RuntimeError("command was cancelled before it was sent")
 
-                await register_running_command(
+                actual_command = f"exec {command}"
+                process = await self._conn.create_process(actual_command)
+
+                registered = await register_running_command(
                     request_id=request_id,
                     server=self.server_name,
                     argv=argv,
                     remote_command=command,
                     process=process,
                 )
+
+                if not registered:
+                    await self._terminate_process(process)
+                    raise RuntimeError("command was cancelled before it was sent")
 
                 try:
                     stdout, stderr = await asyncio.wait_for(

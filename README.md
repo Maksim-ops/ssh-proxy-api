@@ -1361,8 +1361,8 @@ limits:
 
 Рекомендуемый roadmap:
 
-1. Добавить CLI-wrapper `pctl`, который вызывает HTTP API.
-2. Добавить audit log в JSONL-файл.
+сделано 1. Добавить CLI-wrapper `pctl`, который вызывает HTTP API.
+сделано 2. Добавить audit log в JSONL-файл.
 3. Добавить лимиты stdout/stderr.
 4. Добавить несколько серверов в YAML.
 5. Улучшить kubectl policy parser.
@@ -1370,3 +1370,6 @@ limits:
 7. Добавить per-client auth/scopes.
 8. Добавить output filtering для secrets.
 9. Рассмотреть переход с SSH+kubectl на Kubernetes API для kube-операций.
+
+Ctrl-C/cancel отправляет cancel в SSH channel, но не гарантирует убийство процесса на удалённом сервере.
+Для команд, которые остаются жить после cancel, требуется remote process group kill.
