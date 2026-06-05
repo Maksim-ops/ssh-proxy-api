@@ -579,6 +579,153 @@ def cmd_exec(args) -> int:
     )
 
 
+def cmd_ps(args) -> int:
+    token = require_token(args.token)
+
+    status, resp = http_json(
+        proxy_url=args.proxy_url,
+        method="GET",
+        path="/api/v1/running",
+        token=token,
+        timeout=args.timeout,
+    )
+
+    if args.json:
+        print_json_response(resp)
+        return 0 if 200 <= status < 300 else exit_code_for_proxy_error(status, resp)
+
+    if not (200 <= status < 300) or resp.get("ok") is False:
+        print_error_response(resp)
+        return exit_code_for_proxy_error(status, resp)
+
+    running = resp.get("running") or []
+
+    if not running:
+        print("no running commands")
+        return 0
+
+    print("REQUEST_ID\tSERVER\tDURATION_MS\tCOMMAND")
+
+    for item in running:
+        request_id = item.get("request_id")
+        server = item.get("server")
+        duration_ms = item.get("duration_ms")
+        argv = item.get("argv") or []
+        cmd = " ".join(argv)
+
+        print(f"{request_id}\t{server}\t{duration_ms}\t{cmd}")
+
+    return 0
+
+
+def cmd_can_i(args) -> int:
+    server = require_server(args)
+    token = require_token(args.token)
+
+    argv = args.argv or []
+
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+
+    if not argv:
+        eprint("pctl: can-i requires command after --")
+        eprint("example: pctl can-i -- df -h")
+        return 2
+
+    status, resp = http_json(
+        proxy_url=args.proxy_url,
+        method="POST",
+        path="/api/v1/can-i",
+        token=token,
+        body={
+            "server": server,
+            "argv": argv,
+        },
+        timeout=args.timeout,
+    )
+
+    if args.json:
+        print_json_response(resp)
+
+        if 200 <= status < 300 and resp.get("ok", True) is not False:
+            return 0 if resp.get("allowed") is True else 126
+
+        return exit_code_for_proxy_error(status, resp)
+
+    if not (200 <= status < 300):
+        print_error_response(resp)
+        return exit_code_for_proxy_error(status, resp)
+
+    allowed = resp.get("allowed")
+    policy = resp.get("policy")
+    reason = resp.get("reason")
+
+    if allowed:
+        print(f"yes: policy={policy} reason={reason}")
+        return 0
+
+    print(f"no: reason={reason}")
+    return 126
+
+
+def cmd_reload(args) -> int:
+    token = require_token(args.token)
+
+    status, resp = http_json(
+        proxy_url=args.proxy_url,
+        method="POST",
+        path="/api/v1/reload",
+        token=token,
+        timeout=args.timeout,
+    )
+
+    if args.json:
+        print_json_response(resp)
+
+        if 200 <= status < 300 and resp.get("ok", True) is not False:
+            return 0
+
+        return exit_code_for_proxy_error(status, resp)
+
+    if not (200 <= status < 300) or resp.get("ok") is False:
+        print_error_response(resp)
+        return exit_code_for_proxy_error(status, resp)
+
+    print(
+        f"reloaded: servers={len(resp.get('servers') or [])} "
+        f"globalPolicies={len(resp.get('globalPolicies') or [])}"
+    )
+
+    return 0
+
+
+def cmd_health(args) -> int:
+    status, resp = http_json(
+        proxy_url=args.proxy_url,
+        method="GET",
+        path="/health",
+        token=None,
+        timeout=args.timeout,
+    )
+
+    if args.json:
+        print_json_response(resp)
+        return 0 if 200 <= status < 300 else exit_code_for_proxy_error(status, resp)
+
+    if not (200 <= status < 300):
+        print_error_response(resp)
+        return exit_code_for_proxy_error(status, resp)
+
+    print(
+        f"proxy={resp.get('status')} "
+        f"auth={resp.get('auth')} "
+        f"config={resp.get('config')} "
+        f"servers={len(resp.get('servers') or [])}"
+    )
+
+    return 0
+
+
 def main_pctl(argv) -> int:
     parser = argparse.ArgumentParser(
         prog="pctl",
@@ -651,6 +798,19 @@ def main_pctl(argv) -> int:
     p_cancel = subparsers.add_parser("cancel", help="Cancel running command by request_id")
     p_cancel.add_argument("request_id")
     p_cancel.set_defaults(func=cmd_cancel)
+
+    p_health = subparsers.add_parser("health", help="Check proxy health")
+    p_health.set_defaults(func=cmd_health)
+
+    p_ps = subparsers.add_parser("ps", help="List running commands")
+    p_ps.set_defaults(func=cmd_ps)
+
+    p_can_i = subparsers.add_parser("can-i", help="Check whether command is allowed")
+    p_can_i.add_argument("argv", nargs=argparse.REMAINDER)
+    p_can_i.set_defaults(func=cmd_can_i)
+
+    p_reload = subparsers.add_parser("reload", help="Reload proxy config")
+    p_reload.set_defaults(func=cmd_reload)
 
     args = parser.parse_args(argv)
 

@@ -1,14 +1,20 @@
 import time
 import uuid
 import shlex
-from typing import Any, Dict
 
 from fastapi import FastAPI, HTTPException, Depends, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .settings import CONFIG_PATH, API_TOKEN
-from .models import ExecRequest, ExecResponse, ServerRequest, CancelRequest
+from .models import (
+    ExecRequest,
+    ExecResponse,
+    ServerRequest,
+    CancelRequest,
+    CanIRequest,
+    CanIResponse,
+)
 from .running import cancel_running_command, list_running_commands
 from .errors import make_error_body
 from .auth import require_auth
@@ -17,7 +23,10 @@ from .config import (
     get_server_config,
     get_global_policies,
     get_configured_servers,
+    reload_config,
 )
+from .limits import apply_output_limits
+from .rate_limiter import wait_for_rate_limit
 from .policy import evaluate_policy
 from .ssh_manager import (
     get_ssh_manager,
@@ -28,7 +37,7 @@ from .audit import write_audit_event
 
 app = FastAPI(
     title="pctl MVP Proxy",
-    version="0.4.0",
+    version="0.5.0",
 )
 
 
@@ -64,6 +73,7 @@ async def validation_exception_handler(request, exc: RequestValidationError):
 async def health():
     return {
         "status": "ok",
+        "version": "0.5.0",
         "config": CONFIG_PATH,
         "servers": list(CONFIG.get("servers", {}).keys()),
         "globalPolicies": [
@@ -98,6 +108,8 @@ async def servers(
                 "commandTimeoutSeconds": int(server_cfg.get("commandTimeoutSeconds", 60)),
                 "disableGlobalPolicies": bool(server_cfg.get("disableGlobalPolicies", False)),
                 "policies_count": len(server_cfg.get("policies", []) or []),
+                "rateLimit": server_cfg.get("rateLimit", None),
+                "limits": server_cfg.get("limits", None),
             }
         )
 
@@ -272,9 +284,22 @@ async def exec_command(
         flush=True,
     )
 
+    # 3. Rate limit before sending command to server
+    rate_limit_wait_ms = await wait_for_rate_limit(
+        server=req.server,
+        server_cfg=server_cfg,
+    )
+
+    if rate_limit_wait_ms > 0:
+        print(
+            f"[pctl] request_id={request_id} "
+            f"rate_limit_wait_ms={rate_limit_wait_ms}",
+            flush=True,
+        )
+
     manager = get_ssh_manager(req.server, server_cfg)
 
-    # 3. Execute over SSH
+    # 4. Execute over SSH
     try:
         result = await manager.run(
           command=remote_command,
@@ -296,6 +321,7 @@ async def exec_command(
                 "message": str(exc),
                 "policy": decision.policy,
                 "duration_ms": duration_ms,
+                "rate_limit_wait_ms": rate_limit_wait_ms,
                 "client": request.client.host if request.client else None,
             }
         )
@@ -318,17 +344,31 @@ async def exec_command(
     stdout = result.stdout or ""
     stderr = result.stderr or ""
 
+    # 5. Apply output limits
+    stdout, stderr, stdout_truncated, stderr_truncated = apply_output_limits(
+        stdout=stdout,
+        stderr=stderr,
+        server_cfg=server_cfg,
+    )
+
     exit_code = result.exit_status
+
 
     if exit_code is None:
         exit_code = -1
+
+
+    stdout_bytes = len(stdout.encode("utf-8"))
+    stderr_bytes = len(stderr.encode("utf-8"))
 
     print(
         f"[pctl] request_id={request_id} "
         f"exit_code={exit_code} "
         f"duration_ms={duration_ms} "
-        f"stdout_bytes={len(stdout)} "
-        f"stderr_bytes={len(stderr)}",
+        f"stdout_bytes={stdout_bytes} "
+        f"stderr_bytes={stderr_bytes} "
+        f"stdout_truncated={stdout_truncated} "
+        f"stderr_truncated={stderr_truncated}",
         flush=True,
     )
 
@@ -343,8 +383,11 @@ async def exec_command(
             "policy": decision.policy,
             "exit_code": exit_code,
             "duration_ms": duration_ms,
-            "stdout_bytes": len(stdout.encode("utf-8")),
-            "stderr_bytes": len(stderr.encode("utf-8")),
+            "rate_limit_wait_ms": rate_limit_wait_ms,
+            "stdout_bytes": stdout_bytes,
+            "stderr_bytes": stderr_bytes,
+            "stdout_truncated": stdout_truncated,
+            "stderr_truncated": stderr_truncated,
             "client": request.client.host if request.client else None,
         }
     )
@@ -362,6 +405,8 @@ async def exec_command(
         exit_code=exit_code,
         duration_ms=duration_ms,
         policy=decision.policy,
+        stdout_truncated=stdout_truncated,
+        stderr_truncated=stderr_truncated,
     )
 
 @app.get("/api/v1/running")
@@ -371,6 +416,64 @@ async def running_commands(
     return {
         "ok": True,
         "running": await list_running_commands(),
+    }
+
+
+@app.post("/api/v1/reload")
+async def reload_proxy_config(
+    request: Request,
+    _: None = Depends(require_auth),
+):
+    """
+    Перечитывает YAML config без рестарта контейнера.
+
+    Важно:
+      - новые политики/лимиты/rateLimit применятся к новым запросам;
+      - уже открытые SSH-соединения не пересоздаются автоматически;
+      - если поменяли sshHost, лучше сделать disconnect/connect или restart.
+    """
+
+    try:
+        config = reload_config()
+    except Exception as exc:
+        await write_audit_event(
+            {
+                "event": "reload",
+                "decision": "error",
+                "message": str(exc),
+                "client": request.client.host if request.client else None,
+            }
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=make_error_body(
+                error="reload_failed",
+                message=str(exc),
+            ),
+        )
+
+    await write_audit_event(
+        {
+            "event": "reload",
+            "decision": "ok",
+            "servers": list(config.get("servers", {}).keys()),
+            "globalPolicies": [
+                p.get("name", "<unnamed-policy>")
+                for p in config.get("globalPolicies", []) or []
+            ],
+            "client": request.client.host if request.client else None,
+        }
+    )
+
+    return {
+        "ok": True,
+        "message": "config reloaded",
+        "servers": list(config.get("servers", {}).keys()),
+        "globalPolicies": [
+            p.get("name", "<unnamed-policy>")
+            for p in config.get("globalPolicies", []) or []
+        ],
     }
 
 
@@ -422,3 +525,39 @@ async def cancel_command(
         "server": item.server if item else None,
         "argv": item.argv if item else [],
     }
+
+
+@app.post("/api/v1/can-i", response_model=CanIResponse)
+async def can_i(
+    req: CanIRequest,
+    request: Request,
+    _: None = Depends(require_auth),
+):
+    server_cfg = get_server_config(req.server)
+
+    decision = evaluate_policy(
+        server_cfg=server_cfg,
+        global_policies=get_global_policies(),
+        argv=req.argv,
+    )
+
+    await write_audit_event(
+        {
+            "event": "can_i",
+            "server": req.server,
+            "argv": req.argv,
+            "decision": "allow" if decision.allowed else "deny",
+            "policy": decision.policy,
+            "reason": decision.reason,
+            "client": request.client.host if request.client else None,
+        }
+    )
+
+    return CanIResponse(
+        ok=True,
+        allowed=decision.allowed,
+        server=req.server,
+        argv=req.argv,
+        policy=decision.policy,
+        reason=decision.reason,
+    )

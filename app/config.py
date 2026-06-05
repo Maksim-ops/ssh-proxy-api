@@ -7,7 +7,10 @@ from .settings import CONFIG_PATH
 from .errors import make_error_body
 
 
-def load_config() -> Dict[str, Any]:
+CONFIG: Dict[str, Any] = {}
+
+
+def load_config_from_file() -> Dict[str, Any]:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
 
@@ -20,7 +23,17 @@ def load_config() -> Dict[str, Any]:
     return config
 
 
-CONFIG = load_config()
+def reload_config() -> Dict[str, Any]:
+    new_config = load_config_from_file()
+
+    CONFIG.clear()
+    CONFIG.update(new_config)
+
+    return CONFIG
+
+
+# initial load
+reload_config()
 
 
 def get_server_config(
@@ -49,3 +62,11 @@ def get_global_policies() -> list[dict[str, Any]]:
 
 def get_configured_servers() -> Dict[str, Any]:
     return CONFIG.get("servers", {})
+
+
+def get_global_limits() -> Dict[str, Any]:
+    return CONFIG.get("limits", {}) or {}
+
+
+def get_global_rate_limit() -> Dict[str, Any]:
+    return CONFIG.get("rateLimit", {}) or {}

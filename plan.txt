@@ -1,0 +1,169 @@
+На уровне MVP разработано REST API приложение, которое проксирует команды из сервиса X в линукс команды на сервер Y. 
+Выступает прослокой, в которой можно реализовать политики команд, логи, аудит и многое другое.
+Также был разработан cli wrapper который транслирует команды от X в GET/POST запросы по схеме:
+X - ptcl - POST/GET - api - asynssg - ssh
+
+На данном этапе делаем core-api, базу и отлаживаем схему, чтобы механизмы работали.
+В будущем я планирую делать фронтенд на Vue. Полный Admin/User UI и api запросы будем делать позже.
+Моя команда whiskey, проект lifeorient, пользователь maksim.nikitin@flant.com
+
+Ты можешь тестировать изменения подключаясь к серверу 'ssh lifeorient' или отправляя команды на него через core-api.
+Пока не тестируем политики, достаточно использовать команду 'date' или 'sleep'.
+Разрешаю делать любые изменения и команды в этом репозитории, а также отправлять тестовые команды на сервер без уведомления и подтверждения.
+
+1) Необходимо реализовать (для этого можешь использовать текущие разработки, а где надо переделай и удаляй) следующую архитектуру с использованием вебсокетов (кажется похожую архитектуру делает Jenkins, GItlab Runner):
+SSH stdout
+      |
+AsyncSSH
+      |
+CommandStream
+      |
+      +--> deque(last 1000 lines)
+      |
+      +--> logfile (запись в файлы на волюме)
+      |
+      +--> CLI subscribers
+      |
+      +--> WebSocket subscribers (фронтенд)
+
+то есть несколько получателей одновременно могут читать stdout команд от сервера. При этом в любой момент получатель может подключиться к потоку получить последние 1000 строк и далее получить строки в реальном времени. Соответственно можно поделиться ссылкой. И другой человек сможет в браузере открыть, если ему разрешен доступ.
+в python надо реализовать websocket механизм, а потребители будут подключаться по этому механизму через /ws
+stdout и stderr должны храниться в подключаемом волюме.
+
+Примерно появится такой класс:
+class CommandStream: - зто центральная сущность системы
+    def publish(...)
+    def subscribe(...)
+    def unsubscribe(...)
+    если необходимо другие методы
+class StreamSubscriber:
+
+Предлагаю декомпозировать файлы и классы на такую структуру папок (это эскиз):
+app/
+  api/
+    routes_exec.py
+    routes_servers.py
+    routes_admin.py
+  auth/
+    users.py
+    permissions.py
+  policy/
+    engine.py
+    loaders.py
+    rules/
+      exact_argv.py
+      linux_args.py
+      kubectl.py
+  ssh/
+    manager.py
+    state.py
+  audit/
+    writer.py
+  db/
+    models.py
+    session.py
+    repositories.py
+  config/
+    loader.py
+config/
+  config.yml - если необходимо конфиг для самого приложения
+policies/
+  global.yml - пока все политики в одном файле
+
+2) В docker-compose.yaml добавить базу mysql. Разработай для нее схему. главный api назови 'core-api'. Волюмы для логов.
+Начальные таблицы: 
+users
+------
+id
+username
+email
+role
+created_at
+last_login
+public_key
+
+servers (пока можно занести сервер lifeorient в качестве тестов взять из /home/maksim/.ssh/config_proxy)
+--------
+id
+name
+host
+ip
+proxy_id (к некоторым серверам подключение идет не напрямую а через прокси, можешь увидеть в файле)
+port
+environment
+enabled
+created_at
+
+proxies
+-----
+id
+proxy
+
+jobs
+-----
+id
+request_id
+user_id
+server_id
+server_name
+client_type (CLI|WEB|API)
+command
+status  (queued|running|completed|failed|cancelled|timeout)
+stdout_lines (счетчик)
+stderr_lines (счетчик)
+started_at
+finished_at
+exit_code
+
+audit_events
+-------------
+id
+request_id
+user_id
+server_id
+action_id
+resource
+result
+created_at
+
+actions
+----------
+id
+name (EXEC_ALLOWED|EXEC_DENIED|LOGIN|CANCEL)
+
+job_logs
+----------
+job_id
+log_file (ссылка на файл в волюме)
+size_bytes
+line_count
+
+command_streams - для метаданных потока
+---------------
+id
+job_id
+share_token
+is_public
+created_at
+expires_at
+
+tokens
+------
+id
+name
+token_hash
+enabled
+created_at
+
+Пока не делай CRUD для users, servers. 
+Сделай GET servers, jobs, audit.
+Тестовые данные можешь занести напрямую в базу.
+Схему и тестовые sql-запросы положи в файлик
+
+3) реализуй в api Websocket события
+{
+  "type": "..."
+}
+type=started|stdout|stderr|finished|cancelled|error
+
+4) Обнови pctl чтобы он мог подключаться к серверу по вебсокету и получать stdout и stderr команд. Я пока не знаю как в pctl отображать ошибки от самого приложения, может они будут начинаться с решетки как-будто это комментарий.

@@ -1366,10 +1366,90 @@ limits:
 3. Добавить лимиты stdout/stderr.
 4. Добавить несколько серверов в YAML.
 5. Улучшить kubectl policy parser.
+kubectl -n default get pods
+kubectl get pods -n default -o wide
+kubectl get pod/my-pod -n default
+kubectl get pods --all-namespaces
+kubectl get pods -A
+kubectl logs pod-name -n default
+kubectl logs deployment/app -n default
+kubectl describe pod pod-name -n default
+
+Разбор global flags до subcommand
+kubectl -n default get pods
+kubectl --namespace default get pods
+
+Разрешённые output formats
+allowedOutput:
+  - wide
+  - name
+  - yaml
+  - json
+
+И запретить опасные:
+-o jsonpath=...
+-o go-template=...
+-o custom-columns=...
+
+Запрет secrets
+denyResources:
+  - secrets
+  - secret
+
+Отдельная политика для logs
+- name: allow-kubectl-logs
+  command: kubectl
+  subcommands: ["logs"]
+  allowNamespaces: ["default", "stage"]
+  allowedFlags:
+    - "--tail"
+    - "-n"
+    - "--namespace"
+
+Добавить kubectl shim
+sudo mkdir -p /opt/pctl-shim
+sudo ln -sf /usr/local/bin/pctl /opt/pctl-shim/kubectl
+И для сервиса X:
+PATH=/opt/pctl-shim:$PATH
+PCTL_PROXY_URL=http://127.0.0.1:8080
+PCTL_API_TOKEN=...
+PCTL_DEFAULT_SSH_HOST=prod-master-1
+
+
 6. Запретить опасные kubectl resources/verbs.
 7. Добавить per-client auth/scopes.
 8. Добавить output filtering для secrets.
 9. Рассмотреть переход с SSH+kubectl на Kubernetes API для kube-операций.
+10. Добавить token scopes
+tokens:
+  - name: local-dev
+    token: dev-local-token-change-me
+    servers:
+      - lifeorient
+    allowedPolicies:
+      - allow-df-h
+      - allow-ls-paths
+11. Добавить audit event для policy deny
+12. Добавить command hash
+Чтобы не хранить чувствительные аргументы в будущем, можно писать:
+"argv_sha256": "..."
+13. Улучшить политики для Linux-команд
+13.1. stringArgs
+journalctl -u nginx --since "1 hour ago"
+13.2. enumArgs
+args:
+  - type: enum
+    values: ["status"]
+  - type: enum
+    values: ["nginx", "docker"]
+13.3. regexArgs
+14. Добавить install script
+Чтобы не копировать вручную:
+sudo install -m 755 wrapper/pctl.py /usr/local/bin/pctl
+Можно сделать:
+make install-wrapper
+
+
 
 Ctrl-C/cancel отправляет cancel в SSH channel, но не гарантирует убийство процесса на удалённом сервере.
 Для команд, которые остаются жить после cancel, требуется remote process group kill.
