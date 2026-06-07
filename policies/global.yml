@@ -26,6 +26,16 @@ globalPolicies:
     allowedArgv:
       - []
 
+  - name: allow-date
+    command: date
+    allowedArgv:
+      - []
+
+  - name: allow-tail-f-root-test
+    command: tail
+    allowedArgv:
+      - ["-f", "/root/test.txt"]
+
 servers:
   lifeorient:
     sshHost: lifeorient

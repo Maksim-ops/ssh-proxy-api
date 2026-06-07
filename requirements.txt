@@ -3,3 +3,6 @@ uvicorn[standard]==0.34.0
 asyncssh==2.18.0
 PyYAML==6.0.2
 pytest==8.3.4
+SQLAlchemy==2.0.38
+PyMySQL==1.1.1
+websockets==15.0.1

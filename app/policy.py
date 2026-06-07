@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import re
 import posixpath
+from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 
-from .models import PolicyDecision
+
+@dataclass
+class PolicyDecision:
+    allowed: bool
+    policy: Optional[str]
+    reason: str
 
 
 # ---------------------------------------------------------------------

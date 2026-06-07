@@ -1,40 +1,79 @@
-# Запуск dev:
-# docker compose --env-file .env.dev up --build -d
-# Запуск prod:
-# docker compose --env-file .env.prod up --build -d
-
 services:
+  mysql:
+    image: mysql:8.4
+    container_name: core-api-mysql
+    environment:
+      MYSQL_DATABASE: core_api
+      MYSQL_USER: core_api
+      MYSQL_PASSWORD: core_api
+      MYSQL_ROOT_PASSWORD: root-local-change-me
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - ./mysql-data:/var/lib/mysql
+      - ./sql/schema_and_seed.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    restart: unless-stopped
+
+  core-api:
+    build: .
+    container_name: core-api
+    user: "0:0"
+    depends_on:
+      - mysql
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - /home/maksim/.ssh_proxy:/home/appuser/.ssh:ro
+      - ./config:/etc/pctl/config:ro
+      - ./policies:/etc/pctl/policies:ro
+      - ./api-logs:/var/log/core-api
+    environment:
+      PYTHONPATH: /app
+      PCTL_API_TOKEN: dev-local-token-change-me
+      PCTL_SSH_CONFIG: /home/appuser/.ssh/config
+      PCTL_SSH_KNOWN_HOSTS: /home/appuser/.ssh/known_hosts
+      PCTL_CONFIG: /etc/pctl/config/config.yml
+      PCTL_DATABASE_URL: mysql+pymysql://core_api:core_api@mysql:3306/core_api
+      PCTL_LOG_DIR: /var/log/core-api/jobs
+      PCTL_AUDIT_LOG: /var/log/core-api/audit/audit.jsonl
+    restart: unless-stopped
+
+
+  web:
+    build: ../ai-proxy-web
+    container_name: ai-proxy-web
+    depends_on:
+      - core-api
+    ports:
+      - "127.0.0.1:8081:80"
+    restart: unless-stopped
+
   pctl-tests:
     build: .
     container_name: pctl-tests
     volumes:
-      - ./config:/etc/pctl:ro
+      - ./config:/etc/pctl/config:ro
+      - ./policies:/etc/pctl/policies:ro
     environment:
-      - PCTL_CONFIG=/etc/pctl/config.yml
-      - PCTL_TEST_SERVER=lifeorient
+      PYTHONPATH: /app
+      PCTL_CONFIG: /etc/pctl/config/config.yml
+      PCTL_TEST_SERVER: lifeorient
     command: ["pytest", "-q"]
     profiles:
       - test
 
-  pctl-proxy:
-    build: .
-    container_name: pctl-proxy
-    ports:
-      - "127.0.0.1:8080:8080"
-    volumes:
-      #- ./ssh:/home/appuser/.ssh:ro
-      - /home/maksim/.ssh_proxy:/home/appuser/.ssh:ro
-      - ./config:/etc/pctl:ro
-      #- ${PCTL_CONFIG_FILE}:/etc/pctl/config.yml:ro
-      - ./logs:/var/log/pctl
-    environment:
-      - PCTL_DEFAULT_SSH_HOST=lifeorient
-      - PCTL_API_TOKEN=dev-local-token-change-me
-      - PCTL_SSH_CONFIG=/home/appuser/.ssh/config
-      - PCTL_CONFIG=/etc/pctl/config.yml
-      #- PCTL_CONFIG_FILE=./config/config.dev.yml
-      #- PCTL_CONFIG_FILE=./config/config.prod.yml
-      - PCTL_SSH_KNOWN_HOSTS=/home/appuser/.ssh/known_hosts
-      #- PCTL_COMMAND_TIMEOUT_SECONDS=60
-      - PCTL_AUDIT_LOG=/var/log/pctl/audit.jsonl
+  adminer:
+    image: adminer:5.0.6-standalone
+    container_name: adminer
     restart: unless-stopped
+    ports:
+      - 8088:8080
+    links:
+      - mysql
+    environment:
+      ADMINER_DEFAULT_DRIVER: 'MySQL'
+      ADMINER_DEFAULT_SERVER: 'mysql'
+      ADMINER_DEFAULT_DB: 'core_api'
+      ADMINER_DEFAULT_USER: 'core_api'
+      ADMINER_DEFAULT_PASSWORD: 'core_api'
+      ADMINER_DESIGN: 'flat'

@@ -1,2 +1,103 @@
+app:
+  username: maksim.nikitin
+  userEmail: maksim.nikitin@flant.com
+  logDir: /var/log/core-api/jobs
+
+database:
+  url: mysql+pymysql://core_api:core_api@mysql:3306/core_api
+
 streaming:
   history_lines: 1000
+
+policiesFile: /etc/pctl/policies/global.yml
+
+rateLimit:
+  minIntervalSeconds: 5
+
+outputLimits:
+  maxStdoutBytes: 10485760
+  maxStderrBytes: 1048576
+
+globalPolicies:
+  - name: allow-sleep-100
+    command: sleep
+    allowedArgv:
+      - ["100"]
+
+  - name: allow-df-h
+    command: df
+    allowedArgv:
+      - ["-h"]
+
+  - name: allow-uptime
+    command: uptime
+    allowedArgv:
+      - []
+
+  - name: allow-whoami
+    command: whoami
+    allowedArgv:
+      - []
+
+  - name: allow-date
+    command: date
+    allowedArgv:
+      - []
+
+  - name: allow-tail-f-root-test
+    command: tail
+    allowedArgv:
+      - ["-f", "/root/test.txt"]
+
+servers:
+  lifeorient:
+    sshHost: lifeorient
+    commandTimeoutSeconds: 120
+    idleDisconnectSeconds: 300
+    policies:
+      - name: allow-ls-paths
+        command: ls
+        allowedFlags:
+          - "-l"
+          - "-a"
+          - "-h"
+          - "-la"
+          - "-al"
+          - "-lh"
+          - "-hl"
+          - "-lah"
+          - "-lha"
+          - "-alh"
+          - "-ahl"
+        flagsPosition: anywhere
+        pathArgs:
+          min: 0
+          max: 2
+          allowAbsolute: true
+          allowRelative: true
+          allowGlobs: false
+          allowParentTraversal: false
+          denyPrefixes:
+            - "/root/.ssh"
+            - "/proc"
+            - "/sys"
+            - "/dev"
+          denyRegex:
+            - "^/etc/shadow$"
+
+      - name: allow-kubectl-get-basic
+        command: kubectl
+        subcommands: ["get"]
+        resources:
+          - pods
+          - pod
+          - deployments
+          - deployment
+          - services
+          - service
+          - nodes
+          - node
+          - events
+          - namespaces
+          - namespace
+        allowNamespaces: ["*"]
