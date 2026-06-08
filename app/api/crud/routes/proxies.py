@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends
 from app.api.crud.routes.common import handle_crud_error
 from app.api.crud.schemas.proxies import ProxyCreate, ProxyResponse, ProxyUpdate
 from app.auth import AuthenticatedUser, require_auth
+from app.auth.permissions import require_superadmin
 from app.db.crud import create_proxy, delete_proxy, get_proxy, list_proxies, update_proxy
 
 
@@ -12,12 +13,14 @@ router = APIRouter(prefix="/api/v1/proxies", tags=["crud-proxies"])
 
 
 @router.get("", response_model=list[ProxyResponse])
-async def get_proxies(_: AuthenticatedUser = Depends(require_auth)):
+async def get_proxies(user: AuthenticatedUser = Depends(require_auth)):
+    require_superadmin(user)
     return list_proxies()
 
 
 @router.get("/{proxy_id}", response_model=ProxyResponse)
-async def get_proxy_by_id(proxy_id: int, _: AuthenticatedUser = Depends(require_auth)):
+async def get_proxy_by_id(proxy_id: int, user: AuthenticatedUser = Depends(require_auth)):
+    require_superadmin(user)
     try:
         return get_proxy(proxy_id)
     except Exception as exc:
@@ -25,7 +28,8 @@ async def get_proxy_by_id(proxy_id: int, _: AuthenticatedUser = Depends(require_
 
 
 @router.post("", response_model=ProxyResponse)
-async def create_proxy_endpoint(payload: ProxyCreate, _: AuthenticatedUser = Depends(require_auth)):
+async def create_proxy_endpoint(payload: ProxyCreate, user: AuthenticatedUser = Depends(require_auth)):
+    require_superadmin(user)
     try:
         return create_proxy(payload.model_dump())
     except Exception as exc:
@@ -33,7 +37,8 @@ async def create_proxy_endpoint(payload: ProxyCreate, _: AuthenticatedUser = Dep
 
 
 @router.patch("/{proxy_id}", response_model=ProxyResponse)
-async def update_proxy_endpoint(proxy_id: int, payload: ProxyUpdate, _: AuthenticatedUser = Depends(require_auth)):
+async def update_proxy_endpoint(proxy_id: int, payload: ProxyUpdate, user: AuthenticatedUser = Depends(require_auth)):
+    require_superadmin(user)
     try:
         return update_proxy(proxy_id, payload.model_dump(exclude_unset=True))
     except Exception as exc:
@@ -41,7 +46,8 @@ async def update_proxy_endpoint(proxy_id: int, payload: ProxyUpdate, _: Authenti
 
 
 @router.delete("/{proxy_id}")
-async def delete_proxy_endpoint(proxy_id: int, _: AuthenticatedUser = Depends(require_auth)):
+async def delete_proxy_endpoint(proxy_id: int, user: AuthenticatedUser = Depends(require_auth)):
+    require_superadmin(user)
     try:
         delete_proxy(proxy_id)
         return {"ok": True, "deleted_id": proxy_id}

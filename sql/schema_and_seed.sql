@@ -1,11 +1,32 @@
+CREATE TABLE IF NOT EXISTS teams (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(128) NOT NULL UNIQUE,
+  slug VARCHAR(64) NOT NULL UNIQUE,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS projects (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(128) NOT NULL,
+  slug VARCHAR(64) NOT NULL,
+  team_id INT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_projects_team_slug (team_id, slug),
+  CONSTRAINT fk_projects_team FOREIGN KEY (team_id) REFERENCES teams(id)
+);
+
 CREATE TABLE IF NOT EXISTS users (
   id INT AUTO_INCREMENT PRIMARY KEY,
   username VARCHAR(128) NOT NULL UNIQUE,
   email VARCHAR(255) NOT NULL UNIQUE,
   role VARCHAR(32) NOT NULL,
+  team_id INT NULL,
+  password_hash VARCHAR(512) NULL,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_login TIMESTAMP NULL DEFAULT NULL,
-  public_key TEXT NULL
+  public_key TEXT NULL,
+  CONSTRAINT fk_users_team FOREIGN KEY (team_id) REFERENCES teams(id)
 );
 
 CREATE TABLE IF NOT EXISTS proxies (
@@ -19,17 +40,38 @@ CREATE TABLE IF NOT EXISTS servers (
   host VARCHAR(255) NOT NULL,
   ip VARCHAR(64) NULL,
   proxy_id INT NULL,
+  team_id INT NULL,
+  project_id INT NULL,
   port INT NOT NULL DEFAULT 22,
   environment VARCHAR(64) NOT NULL DEFAULT 'dev',
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT fk_servers_proxy FOREIGN KEY (proxy_id) REFERENCES proxies(id)
+  CONSTRAINT fk_servers_proxy FOREIGN KEY (proxy_id) REFERENCES proxies(id),
+  CONSTRAINT fk_servers_team FOREIGN KEY (team_id) REFERENCES teams(id),
+  CONSTRAINT fk_servers_project FOREIGN KEY (project_id) REFERENCES projects(id)
+);
+
+CREATE TABLE IF NOT EXISTS user_sessions (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  session_uid VARCHAR(64) NOT NULL UNIQUE,
+  user_id INT NOT NULL,
+  token_hash VARCHAR(255) NOT NULL UNIQUE,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  expires_at TIMESTAMP NOT NULL,
+  last_used_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  revoked_at TIMESTAMP NULL DEFAULT NULL,
+  revoked_reason VARCHAR(128) NULL,
+  rotated_from_session_id INT NULL,
+  user_agent VARCHAR(255) NULL,
+  ip_address VARCHAR(64) NULL,
+  CONSTRAINT fk_user_sessions_user FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
   id INT AUTO_INCREMENT PRIMARY KEY,
   request_id VARCHAR(64) NOT NULL UNIQUE,
   user_id INT NULL,
+  auth_session_id INT NULL,
   server_id INT NULL,
   server_name VARCHAR(128) NOT NULL,
   client_type VARCHAR(16) NOT NULL,
@@ -40,6 +82,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   started_at TIMESTAMP NULL DEFAULT NULL,
   finished_at TIMESTAMP NULL DEFAULT NULL,
   exit_code INT NULL,
+  hidden_at TIMESTAMP NULL DEFAULT NULL,
+  hidden_by_user_id INT NULL,
   CONSTRAINT fk_jobs_user FOREIGN KEY (user_id) REFERENCES users(id),
   CONSTRAINT fk_jobs_server FOREIGN KEY (server_id) REFERENCES servers(id)
 );
@@ -55,8 +99,11 @@ CREATE TABLE IF NOT EXISTS audit_events (
   user_id INT NULL,
   server_id INT NULL,
   action_id INT NULL,
+  session_id INT NULL,
   resource VARCHAR(255) NOT NULL,
   result VARCHAR(64) NOT NULL,
+  ip_address VARCHAR(64) NULL,
+  details_json TEXT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_audit_user FOREIGN KEY (user_id) REFERENCES users(id),
   CONSTRAINT fk_audit_server FOREIGN KEY (server_id) REFERENCES servers(id),
@@ -90,24 +137,21 @@ CREATE TABLE IF NOT EXISTS tokens (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-INSERT IGNORE INTO actions (id, name) VALUES
-  (1, 'EXEC_ALLOWED'),
-  (2, 'EXEC_DENIED'),
-  (3, 'LOGIN'),
-  (4, 'CANCEL');
+INSERT IGNORE INTO actions (name) VALUES
+  ('EXEC_ALLOWED'),
+  ('EXEC_DENIED'),
+  ('LOGIN_SUCCESS'),
+  ('LOGIN_FAILURE'),
+  ('LOGOUT'),
+  ('SESSION_REVOKED'),
+  ('SUSPICIOUS_AUTH'),
+  ('CANCEL'),
+  ('PASSWORD_CHANGED'),
+  ('SESSION_ROTATED'),
+  ('SESSION_HIDDEN');
 
-INSERT IGNORE INTO proxies (id, proxy) VALUES
-  (1, 'direct');
+INSERT IGNORE INTO teams (name, slug) VALUES
+  ('Platform', 'platform');
 
-INSERT IGNORE INTO users (id, username, email, role, public_key) VALUES
-  (1, 'maksim.nikitin', 'maksim.nikitin@flant.com', 'admin', NULL);
-
-INSERT IGNORE INTO servers (id, name, host, ip, proxy_id, port, environment, enabled) VALUES
-  (1, 'lifeorient', 'lifeorient', '84.54.28.170', 1, 22, 'dev', TRUE);
-
-INSERT IGNORE INTO tokens (id, name, token_hash, enabled) VALUES
-  (1, 'default-api-token', SHA2('dev-local-token-change-me', 256), TRUE);
-
-SELECT id, name, host, ip, enabled FROM servers ORDER BY id;
-SELECT id, request_id, server_name, status, exit_code FROM jobs ORDER BY id DESC LIMIT 20;
-SELECT id, request_id, resource, result, created_at FROM audit_events ORDER BY id DESC LIMIT 20;
+INSERT IGNORE INTO proxies (proxy) VALUES
+  ('direct');

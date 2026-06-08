@@ -14,13 +14,35 @@ class Base(DeclarativeBase):
     pass
 
 
+class Team(Base):
+    __tablename__ = "teams"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    slug: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class Project(Base):
+    __tablename__ = "projects"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     username: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
-    role: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
+    role: Mapped[str] = mapped_column(String(32), nullable=False, default="engineer")
+    team_id: Mapped[int | None] = mapped_column(ForeignKey("teams.id"), nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     last_login: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     public_key: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -41,10 +63,29 @@ class Server(Base):
     host: Mapped[str] = mapped_column(String(255), nullable=False)
     ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
     proxy_id: Mapped[int | None] = mapped_column(ForeignKey("proxies.id"), nullable=True)
+    team_id: Mapped[int | None] = mapped_column(ForeignKey("teams.id"), nullable=True)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id"), nullable=True)
     port: Mapped[int] = mapped_column(Integer, nullable=False, default=22)
     environment: Mapped[str] = mapped_column(String(64), nullable=False, default="dev")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_uid: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    rotated_from_session_id: Mapped[int | None] = mapped_column(ForeignKey("user_sessions.id"), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class Job(Base):
@@ -53,6 +94,7 @@ class Job(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     request_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    auth_session_id: Mapped[int | None] = mapped_column(ForeignKey("user_sessions.id"), nullable=True)
     server_id: Mapped[int | None] = mapped_column(ForeignKey("servers.id"), nullable=True)
     server_name: Mapped[str] = mapped_column(String(128), nullable=False)
     client_type: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -63,6 +105,8 @@ class Job(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    hidden_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
 
 class Action(Base):
@@ -80,8 +124,11 @@ class AuditEvent(Base):
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     server_id: Mapped[int | None] = mapped_column(ForeignKey("servers.id"), nullable=True)
     action_id: Mapped[int | None] = mapped_column(ForeignKey("actions.id"), nullable=True)
+    session_id: Mapped[int | None] = mapped_column(ForeignKey("user_sessions.id"), nullable=True)
     resource: Mapped[str] = mapped_column(String(255), nullable=False)
     result: Mapped[str] = mapped_column(String(64), nullable=False)
+    ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    details_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 

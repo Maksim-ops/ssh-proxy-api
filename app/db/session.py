@@ -73,6 +73,88 @@ def _apply_schema_file() -> None:
             conn.execute(text(statement))
 
 
+def _column_exists(conn, *, table_name: str, column_name: str) -> bool:
+    database_name = _get_database_url().database
+    result = conn.execute(
+        text(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = :database_name
+              AND table_name = :table_name
+              AND column_name = :column_name
+            LIMIT 1
+            """
+        ),
+        {
+            "database_name": database_name,
+            "table_name": table_name,
+            "column_name": column_name,
+        },
+    ).scalar()
+    return bool(result)
+
+
+def _table_exists(conn, *, table_name: str) -> bool:
+    database_name = _get_database_url().database
+    result = conn.execute(
+        text(
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = :database_name
+              AND table_name = :table_name
+            LIMIT 1
+            """
+        ),
+        {
+            "database_name": database_name,
+            "table_name": table_name,
+        },
+    ).scalar()
+    return bool(result)
+
+
+def _add_column_if_missing(conn, *, table_name: str, column_name: str, definition: str) -> None:
+    if _column_exists(conn, table_name=table_name, column_name=column_name):
+        return
+    conn.execute(text(f"ALTER TABLE `{table_name}` ADD COLUMN {definition}"))
+
+
+def _run_schema_migrations() -> None:
+    with get_engine().begin() as conn:
+        if not _table_exists(conn, table_name="projects"):
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE `projects` (
+                      `id` INT AUTO_INCREMENT PRIMARY KEY,
+                      `name` VARCHAR(128) NOT NULL,
+                      `slug` VARCHAR(64) NOT NULL,
+                      `team_id` INT NOT NULL,
+                      `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      CONSTRAINT `fk_projects_team` FOREIGN KEY (`team_id`) REFERENCES `teams`(`id`)
+                    )
+                    """
+                )
+            )
+
+        _add_column_if_missing(conn, table_name="users", column_name="team_id", definition="`team_id` INT NULL")
+        _add_column_if_missing(conn, table_name="users", column_name="password_hash", definition="`password_hash` VARCHAR(512) NULL")
+        _add_column_if_missing(conn, table_name="users", column_name="is_active", definition="`is_active` BOOLEAN NOT NULL DEFAULT TRUE")
+
+        _add_column_if_missing(conn, table_name="servers", column_name="team_id", definition="`team_id` INT NULL")
+        _add_column_if_missing(conn, table_name="servers", column_name="project_id", definition="`project_id` INT NULL")
+
+        _add_column_if_missing(conn, table_name="jobs", column_name="auth_session_id", definition="`auth_session_id` INT NULL")
+        _add_column_if_missing(conn, table_name="jobs", column_name="hidden_at", definition="`hidden_at` TIMESTAMP NULL DEFAULT NULL")
+        _add_column_if_missing(conn, table_name="jobs", column_name="hidden_by_user_id", definition="`hidden_by_user_id` INT NULL")
+
+        _add_column_if_missing(conn, table_name="audit_events", column_name="session_id", definition="`session_id` INT NULL")
+        _add_column_if_missing(conn, table_name="audit_events", column_name="ip_address", definition="`ip_address` VARCHAR(64) NULL")
+        _add_column_if_missing(conn, table_name="audit_events", column_name="details_json", definition="`details_json` TEXT NULL")
+
+
 def get_engine():
     global _engine
 
@@ -124,6 +206,7 @@ def init_db() -> None:
         conn.execute(text(f"CREATE DATABASE IF NOT EXISTS `{database_name}`"))
 
     _apply_schema_file()
+    _run_schema_migrations()
 
 
 def get_db() -> Generator[Session, None, None]:

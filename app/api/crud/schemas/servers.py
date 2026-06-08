@@ -10,6 +10,8 @@ class ServerCreate(BaseModel):
     host: str
     ip: str | None = None
     proxy_id: int | None = None
+    team_id: int | None = None
+    project_id: int | None = None
     port: int = 22
     environment: str = "dev"
     enabled: bool = True
@@ -20,6 +22,8 @@ class ServerUpdate(BaseModel):
     host: str | None = None
     ip: str | None = None
     proxy_id: int | None = None
+    team_id: int | None = None
+    project_id: int | None = None
     port: int | None = None
     environment: str | None = None
     enabled: bool | None = None
@@ -33,6 +37,11 @@ class ServerResponse(BaseModel):
     host: str
     ip: str | None = None
     proxy_id: int | None = None
+    proxy_name: str | None = None
+    team_id: int | None = None
+    team_name: str | None = None
+    project_id: int | None = None
+    project_name: str | None = None
     port: int
     environment: str
     enabled: bool

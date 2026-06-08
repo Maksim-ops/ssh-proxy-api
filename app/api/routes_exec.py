@@ -14,8 +14,22 @@ from app.api.rate_limit import wait_for_rate_limit
 from app.api.schemas import CancelRequest, CanIRequest, CanIResponse, ExecAcceptedResponse, ExecRequest
 from app.audit import write_audit_event
 from app.auth import AuthenticatedUser, require_auth, require_ws_access
+from app.auth.permissions import is_superadmin
 from app.config import SETTINGS, get_global_policies, get_server_config
-from app.db.repositories import build_job_log_entries, create_command_stream, create_job, get_server_by_name, get_stream_meta, get_user_by_email, replace_job_logs, update_job_finished, update_job_started
+from app.db.repositories import (
+    build_job_log_entries,
+    create_command_stream,
+    create_job,
+    get_job_by_request_id,
+    get_server_by_name,
+    get_stream_meta,
+    get_user_by_email,
+    replace_job_logs,
+    update_job_finished,
+    update_job_started,
+    user_can_access_server,
+    user_can_access_stream,
+)
 from app.policy import evaluate_policy
 from app.ssh.manager import get_ssh_manager
 from app.ssh.state import CommandStream, get_stream, register_stream, remove_running_command, request_cancel
@@ -30,33 +44,51 @@ def _build_ws_paths(stream_id: int, share_token: str) -> tuple[str, str]:
     return ws_path, share_ws_path
 
 
+def _ensure_server_scope(server_name: str, user: AuthenticatedUser, request_id: str | None = None) -> None:
+    allowed = user_can_access_server(server_name=server_name, is_superadmin=is_superadmin(user), team_id=user.team_id)
+    if not allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=make_error_body(
+                error="forbidden_server",
+                message=f"Access to server '{server_name}' is forbidden",
+                request_id=request_id,
+                server=server_name,
+            ),
+        )
+
+
 async def _execute_job(*, job_id: int, stream: CommandStream, request_id: str, server_name: str, argv: list[str], user: AuthenticatedUser, server_row_id: Optional[int]) -> None:
     server_cfg = get_server_config(server_name, request_id=request_id)
     remote_command = shlex.join(argv)
     manager = get_ssh_manager(server_name, server_cfg)
 
-    await stream.publish({
-        "type": "started",
-        "stream_id": stream.stream_id,
-        "job_id": job_id,
-        "request_id": request_id,
-        "server": server_name,
-        "argv": argv,
-        "command": remote_command,
-    })
+    await stream.publish(
+        {
+            "type": "started",
+            "stream_id": stream.stream_id,
+            "job_id": job_id,
+            "request_id": request_id,
+            "server": server_name,
+            "argv": argv,
+            "command": remote_command,
+        }
+    )
 
     update_job_started(job_id)
 
     try:
         result = await manager.run(command=remote_command, request_id=request_id, argv=argv, job_id=job_id, stream=stream)
     except Exception as exc:
-        await stream.publish({
-            "type": "error",
-            "stream_id": stream.stream_id,
-            "job_id": job_id,
-            "request_id": request_id,
-            "message": str(exc),
-        })
+        await stream.publish(
+            {
+                "type": "error",
+                "stream_id": stream.stream_id,
+                "job_id": job_id,
+                "request_id": request_id,
+                "message": str(exc),
+            }
+        )
         update_job_finished(job_id, status="failed", exit_code=1, stdout_lines=stream.stdout_lines, stderr_lines=stream.stderr_lines)
         replace_job_logs(job_id, build_job_log_entries(job_id, stream.stdout_log_path, stream.stdout_lines, stream.stderr_log_path, stream.stderr_lines))
         await write_audit_event(
@@ -72,6 +104,7 @@ async def _execute_job(*, job_id: int, stream: CommandStream, request_id: str, s
             request_id=request_id,
             user_id=user.id,
             server_id=server_row_id,
+            session_id=user.session_id,
             resource="exec",
             result="failed",
         )
@@ -92,14 +125,16 @@ async def _execute_job(*, job_id: int, stream: CommandStream, request_id: str, s
         terminal_status = "cancelled"
 
     if not stream.closed:
-        await stream.publish({
-            "type": terminal_type,
-            "stream_id": stream.stream_id,
-            "job_id": job_id,
-            "request_id": request_id,
-            "exit_code": exit_code,
-            "status": terminal_status,
-        })
+        await stream.publish(
+            {
+                "type": terminal_type,
+                "stream_id": stream.stream_id,
+                "job_id": job_id,
+                "request_id": request_id,
+                "exit_code": exit_code,
+                "status": terminal_status,
+            }
+        )
 
     update_job_finished(job_id, status=terminal_status, exit_code=exit_code, stdout_lines=stream.stdout_lines, stderr_lines=stream.stderr_lines)
     replace_job_logs(job_id, build_job_log_entries(job_id, stream.stdout_log_path, stream.stdout_lines, stream.stderr_log_path, stream.stderr_lines))
@@ -117,6 +152,7 @@ async def _execute_job(*, job_id: int, stream: CommandStream, request_id: str, s
             request_id=request_id,
             user_id=user.id,
             server_id=server_row_id,
+            session_id=user.session_id,
             resource="exec",
             result=terminal_status,
         )
@@ -124,7 +160,8 @@ async def _execute_job(*, job_id: int, stream: CommandStream, request_id: str, s
 
 
 @router.post("/api/v1/can-i", response_model=CanIResponse)
-async def can_i(req: CanIRequest, _: AuthenticatedUser = Depends(require_auth)):
+async def can_i(req: CanIRequest, user: AuthenticatedUser = Depends(require_auth)):
+    _ensure_server_scope(req.server, user)
     server_cfg = get_server_config(req.server)
     decision = evaluate_policy(server_cfg=server_cfg, global_policies=get_global_policies(), argv=req.argv)
     return CanIResponse(ok=True, allowed=decision.allowed, server=req.server, argv=req.argv, policy=decision.policy, reason=decision.reason)
@@ -135,6 +172,7 @@ async def exec_command(req: ExecRequest, request: Request, user: AuthenticatedUs
     request_id = req.request_id or str(uuid.uuid4())
     started_at = time.monotonic()
 
+    _ensure_server_scope(req.server, user, request_id=request_id)
     server_cfg = get_server_config(req.server, request_id=request_id)
     server_row = get_server_by_name(req.server)
     user_row = get_user_by_email(user.email)
@@ -161,6 +199,7 @@ async def exec_command(req: ExecRequest, request: Request, user: AuthenticatedUs
             request_id=request_id,
             user_id=user_row.id if user_row else user.id,
             server_id=server_row.id if server_row else None,
+            session_id=user.session_id,
             resource="exec",
             result="denied",
         )
@@ -180,6 +219,7 @@ async def exec_command(req: ExecRequest, request: Request, user: AuthenticatedUs
     job = create_job(
         request_id=request_id,
         user_id=user_row.id if user_row else user.id,
+        auth_session_id=user.session_id,
         server_id=server_row.id if server_row else None,
         server_name=req.server,
         client_type=req.client_type,
@@ -212,6 +252,7 @@ async def exec_command(req: ExecRequest, request: Request, user: AuthenticatedUs
         request_id=request_id,
         user_id=user_row.id if user_row else user.id,
         server_id=server_row.id if server_row else None,
+        session_id=user.session_id,
         resource="exec",
         result="queued",
     )
@@ -247,7 +288,13 @@ async def exec_command(req: ExecRequest, request: Request, user: AuthenticatedUs
 async def cancel_command(req: CancelRequest, user: AuthenticatedUser = Depends(require_auth)):
     running = await request_cancel(req.request_id)
 
-    if running is None:
+    if running is not None:
+        _ensure_server_scope(running.server, user, request_id=req.request_id)
+    else:
+        job = get_job_by_request_id(req.request_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=make_error_body(error="session_not_found", message="Unknown request_id", request_id=req.request_id))
+        _ensure_server_scope(job["server_name"], user, request_id=req.request_id)
         await write_audit_event(
             {
                 "event": "cancel_requested",
@@ -258,6 +305,7 @@ async def cancel_command(req: CancelRequest, user: AuthenticatedUser = Depends(r
             action_name="CANCEL",
             request_id=req.request_id,
             user_id=user.id,
+            session_id=user.session_id,
             resource="exec",
             result="accepted",
         )
@@ -270,14 +318,16 @@ async def cancel_command(req: CancelRequest, user: AuthenticatedUser = Depends(r
             detail=make_error_body(error="cancel_failed", message=message, request_id=req.request_id),
         )
 
-    await running.stream.publish({
-        "type": "cancelled",
-        "stream_id": running.stream.stream_id,
-        "job_id": running.job_id,
-        "request_id": req.request_id,
-        "status": "cancelled",
-        "exit_code": 130,
-    })
+    await running.stream.publish(
+        {
+            "type": "cancelled",
+            "stream_id": running.stream.stream_id,
+            "job_id": running.job_id,
+            "request_id": req.request_id,
+            "status": "cancelled",
+            "exit_code": 130,
+        }
+    )
     await running.stream.close()
     update_job_finished(
         running.job_id,
@@ -310,6 +360,7 @@ async def cancel_command(req: CancelRequest, user: AuthenticatedUser = Depends(r
         request_id=req.request_id,
         user_id=user.id,
         server_id=server_row.id if server_row else None,
+        session_id=user.session_id,
         resource="exec",
         result="accepted",
     )
@@ -325,6 +376,7 @@ async def cancel_command(req: CancelRequest, user: AuthenticatedUser = Depends(r
         request_id=req.request_id,
         user_id=user.id,
         server_id=server_row.id if server_row else None,
+        session_id=user.session_id,
         resource="exec",
         result="cancelled",
     )
@@ -336,8 +388,12 @@ async def websocket_stream(
     websocket: WebSocket,
     stream_id: int = Query(...),
     history_lines: int = Query(default=1000, ge=0, le=5000),
-    _: AuthenticatedUser = Depends(require_ws_access),
+    user: AuthenticatedUser = Depends(require_ws_access),
 ):
+    if not user.is_share_token and not user_can_access_stream(stream_id=stream_id, is_superadmin=is_superadmin(user), team_id=user.team_id):
+        await websocket.close(code=4403)
+        return
+
     stream = await get_stream(stream_id)
     meta = get_stream_meta(stream_id)
 

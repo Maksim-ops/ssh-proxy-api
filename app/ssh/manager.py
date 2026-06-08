@@ -1,14 +1,97 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 import asyncssh
 
 from app.config import SETTINGS
 from app.ssh.state import CommandStream, RunningCommand, is_cancel_requested, register_running_command, unregister_running_command
+
+_RUNTIME_SSH_CONFIG = Path('/tmp/pctl-ssh-config')
+_RUNTIME_SSH_KNOWN_HOSTS = Path('/tmp/pctl-known_hosts')
+_PROXY_COMMAND_RE = re.compile(r'^(\s*ProxyCommand\s+)(.+)$', re.IGNORECASE)
+_RENAMED_OPTIONS = {
+    'PubkeyAcceptedKeyTypes': 'PubkeyAcceptedAlgorithms',
+}
+_ALLOWED_LEGACY_ALGORITHMS = {'ssh-rsa', 'ssh-rsa-cert-v01@openssh.com'}
+
+
+def _normalize_algorithm_value(value: str) -> str | None:
+    prefix = ''
+    raw = value.strip()
+    if raw[:1] in {'+', '-', '^'}:
+        prefix = raw[0]
+        raw = raw[1:]
+
+    allowed = [item.strip() for item in raw.split(',') if item.strip() in _ALLOWED_LEGACY_ALGORITHMS]
+    if not allowed:
+        return None
+    return prefix + ','.join(allowed)
+
+
+def _normalize_ssh_config(content: str, runtime_path: Path, known_hosts_path: Path) -> str:
+    normalized: list[str] = [
+        'Host *',
+        f'    UserKnownHostsFile {known_hosts_path}',
+        '    StrictHostKeyChecking accept-new',
+        '',
+    ]
+
+    for line in content.splitlines():
+        stripped = line.lstrip()
+        indent = line[:len(line) - len(stripped)]
+        if not stripped or stripped.startswith('#'):
+            normalized.append(line)
+            continue
+
+        option, _, value = stripped.partition(' ')
+        option = option.strip()
+        value = value.strip()
+
+        if option in _RENAMED_OPTIONS:
+            option = _RENAMED_OPTIONS[option]
+
+        if option in {'HostkeyAlgorithms', 'PubkeyAcceptedAlgorithms'}:
+            normalized_value = _normalize_algorithm_value(value)
+            if normalized_value is None:
+                continue
+            normalized.append(f'{indent}{option} {normalized_value}')
+            continue
+
+        proxy_match = _PROXY_COMMAND_RE.match(line)
+        if proxy_match:
+            prefix, command = proxy_match.groups()
+            command = command.strip()
+            if command.startswith('ssh ') and ' -F ' not in command:
+                command = f'ssh -F {runtime_path} ' + command[4:]
+            normalized.append(prefix + command)
+            continue
+
+        normalized.append(f'{indent}{option} {value}'.rstrip())
+
+    return "\n".join(normalized) + "\n"
+
+
+def _get_runtime_known_hosts_path() -> str:
+    source_path = Path(SETTINGS.ssh_known_hosts)
+    content = source_path.read_text(encoding='utf-8', errors='replace') if source_path.exists() else ''
+    if not _RUNTIME_SSH_KNOWN_HOSTS.exists() or _RUNTIME_SSH_KNOWN_HOSTS.read_text(encoding='utf-8', errors='replace') != content:
+        _RUNTIME_SSH_KNOWN_HOSTS.write_text(content, encoding='utf-8')
+    return str(_RUNTIME_SSH_KNOWN_HOSTS)
+
+
+def _get_runtime_ssh_config_path() -> str:
+    source_path = Path(SETTINGS.ssh_config)
+    content = source_path.read_text(encoding='utf-8', errors='replace')
+    normalized = _normalize_ssh_config(content, _RUNTIME_SSH_CONFIG, Path(_get_runtime_known_hosts_path()))
+    if not _RUNTIME_SSH_CONFIG.exists() or _RUNTIME_SSH_CONFIG.read_text(encoding='utf-8', errors='replace') != normalized:
+        _RUNTIME_SSH_CONFIG.write_text(normalized, encoding='utf-8')
+    return str(_RUNTIME_SSH_CONFIG)
 
 
 @dataclass
@@ -81,8 +164,8 @@ class SSHManager:
 
             self._conn = await asyncssh.connect(
                 self.ssh_host,
-                config=[SETTINGS.ssh_config],
-                known_hosts=SETTINGS.ssh_known_hosts,
+                config=[_get_runtime_ssh_config_path()],
+                known_hosts=_get_runtime_known_hosts_path(),
                 keepalive_interval=30,
                 keepalive_count_max=3,
             )

@@ -28,6 +28,8 @@ async def write_audit_event(
     request_id: Optional[str] = None,
     user_id: Optional[int] = None,
     server_id: Optional[int] = None,
+    session_id: Optional[int] = None,
+    ip_address: Optional[str] = None,
     resource: Optional[str] = None,
     result: Optional[str] = None,
 ) -> None:
@@ -47,6 +49,9 @@ async def write_audit_event(
                 user_id=user_id,
                 server_id=server_id,
                 action_name=action_name,
+                session_id=session_id,
+                ip_address=ip_address or payload.get("ip_address"),
+                details=payload,
                 resource=resource or str(payload.get("resource") or payload.get("event") or "unknown"),
                 result=result or str(payload.get("decision") or payload.get("result") or "unknown"),
             )

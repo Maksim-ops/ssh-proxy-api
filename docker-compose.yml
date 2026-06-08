@@ -23,13 +23,22 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
-      - /home/maksim/.ssh_proxy:/home/appuser/.ssh:ro
+      #- /home/maksim/.ssh_proxy:/home/appuser/.ssh:ro
+      - /home/maksim/.ssh:/home/appuser/.ssh:ro
+      - ${SSH_AUTH_SOCK}:${SSH_AUTH_SOCK}
       - ./config:/etc/pctl/config:ro
       - ./policies:/etc/pctl/policies:ro
       - ./api-logs:/var/log/core-api
     environment:
       PYTHONPATH: /app
+      SSH_AUTH_SOCK: ${SSH_AUTH_SOCK}
       PCTL_API_TOKEN: dev-local-token-change-me
+      PCTL_SUPERADMIN_EMAIL: superadmin@local
+      PCTL_SUPERADMIN_USERNAME: superadmin
+      PCTL_SUPERADMIN_PASSWORD: superadmin-change-me
+      PCTL_AUTH_ACCESS_TTL_MINUTES: 480
+      PCTL_IMPORT_SSH_CONFIG_MODE: ${PCTL_IMPORT_SSH_CONFIG_MODE:-off}
+      PCTL_IMPORT_SSH_CONFIG_MARKER: ${PCTL_IMPORT_SSH_CONFIG_MARKER}
       PCTL_SSH_CONFIG: /home/appuser/.ssh/config
       PCTL_SSH_KNOWN_HOSTS: /home/appuser/.ssh/known_hosts
       PCTL_CONFIG: /etc/pctl/config/config.yml
@@ -77,3 +86,4 @@ services:
       ADMINER_DEFAULT_USER: 'core_api'
       ADMINER_DEFAULT_PASSWORD: 'core_api'
       ADMINER_DESIGN: 'flat'
+

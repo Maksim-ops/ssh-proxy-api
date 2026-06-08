@@ -1,20 +1,22 @@
 # core-api
 
-`core-api` — локально запущенный FastAPI-сервис, который принимает команды по HTTP, проверяет их по policy, выполняет на удалённом сервере через SSH и стримит stdout/stderr по websocket.
+`core-api` — FastAPI-сервис для выполнения команд по HTTP, проверки по policy, запуска на удалённых серверах по SSH и стриминга stdout/stderr по websocket.
 
 ## Схема
 
 ```text
-pctl / curl / service X
+UI / curl / pctl
         |
-        | POST /api/v1/exec
+        | HTTP API + WebSocket
         v
 +-----------------------------+
 | core-api                    |
-| - token auth                |
+| - password auth             |
+| - opaque user sessions      |
+| - role / permission model   |
+| - team-based visibility     |
 | - policy engine             |
-| - MySQL metadata/audit      |
-| - CommandStream             |
+| - MySQL metadata / audit    |
 | - websocket /ws             |
 | - AsyncSSH manager          |
 +-------------+---------------+
@@ -22,76 +24,123 @@ pctl / curl / service X
               | SSH
               v
 +-----------------------------+
-| remote server: lifeorient   |
+| remote servers              |
 +-----------------------------+
-```
-
-Поток выполнения:
-
-```text
-SSH stdout/stderr
-      |
-   AsyncSSH
-      |
- CommandStream
-      |
-      +--> history (last N lines)
-      +--> logfile in volume
-      +--> CLI subscriber (pctl)
-      +--> WebSocket subscriber (/ws)
 ```
 
 ## Что умеет приложение
 
-- принимать команды через `POST /api/v1/exec`
-- проверять команды по deny-by-default policy
-- выполнять разрешённые команды на `lifeorient` по SSH
-- стримить `stdout`/`stderr` через websocket
-- хранить `jobs`, `audit`, `servers`, `command_streams` в локальной MySQL
-- писать stdout/stderr и audit в volume на локальной машине
-- отменять long-running команды через `POST /api/v1/cancel`
-- отдавать `GET /api/v1/jobs`, `GET /api/v1/audit`, `GET /api/v1/running`
-- давать CRUD для `users`, `proxies`, `servers`, `actions`, `tokens`
+- выполнять разрешённые команды через `POST /api/v1/exec`
+- стримить выполнение через websocket `/ws`
+- хранить `jobs`, `job_logs`, `command_streams`, `audit_events`, `teams`, `users`, `user_sessions`
+- вести audit auth/exec событий
+- ограничивать видимость серверов и command sessions по команде пользователя
+- управлять users / teams / servers / proxies / tokens через CRUD API для superadmin
 
-## Как работает SSH-соединение
+## Auth и session model
 
-`core-api` не открывает новое SSH-соединение на каждую команду.
+Локальный login больше не выдаёт токен только по email.
 
-- при первой команде создаётся SSH connection к `lifeorient`
-- следующие команды переиспользуют это соединение
-- после последней команды соединение держится idle несколько минут
-- текущий idle timeout: `300` секунд
-- затем соединение закрывается автоматически
-- при `cancel` и аварийных ситуациях connection может быть принудительно reset
+Теперь flow такой:
 
-Настройка задаётся в server config:
+1. UI вызывает `POST /api/v1/auth/token` с `email` и `password`.
+2. API проверяет локальный password hash и rate limit.
+3. Если credentials валидны, создаётся запись в `user_sessions`.
+4. Клиент получает opaque Bearer token, который хранится в БД только в виде hash.
+5. У сессии есть TTL (`expires_at`), `last_used_at`, `revoked_at`, `revoked_reason`, `ip_address`, `user_agent`.
+
+### Что реализовано для production-like auth
+
+- password-based factor владения для локальных запусков
+- отдельная таблица `user_sessions`
+- сроки жизни токена / session TTL
+- revoke текущей сессии: `POST /api/v1/auth/logout`
+- revoke всех сессий пользователя: `POST /api/v1/auth/logout-all`
+- revoke любой auth session superadmin'ом: `POST /api/v1/auth/sessions/{session_uid}/revoke`
+- rotation текущей сессии: `POST /api/v1/auth/rotate`
+- rotation после sensitive action: `POST /api/v1/auth/password`
+- rate limit на auth endpoints
+- защита от user enumeration: при bad email/password возвращается общий `invalid_credentials`
+- аудит событий: `failed_login`, `logout`, `token_revoked`, `suspicious_auth_attempt`
+
+### Ограничения текущей локальной реализации
+
+- transport пока HTTP, не HTTPS
+- auth rate limit in-memory и привязан к одному инстансу приложения
+- OIDC / OTP пока не подключены, но локальный session model уже совместим по структуре с будущим внешним login provider
+
+## Роли, permissions и команды
+
+Поддерживаются роли:
+
+- `superadmin`
+- `engineer`
+- `tl`
+- `pm`
+
+`superadmin` видит и управляет всем.
+
+Остальные роли ограничены своей командой:
+
+- пользователь привязан к `team_id`
+- сервер привязан к `team_id`
+- пользователь команды видит только свои серверы
+- command sessions и running commands тоже фильтруются по серверам команды
+
+### Таблицы, связанные с access model
+
+- `teams`
+- `users.team_id`
+- `servers.team_id`
+- `user_sessions`
+
+## Переменные окружения
+
+Основные env для локального auth:
+
+```text
+PCTL_SUPERADMIN_EMAIL=superadmin@local
+PCTL_SUPERADMIN_USERNAME=superadmin
+PCTL_SUPERADMIN_PASSWORD=superadmin-change-me
+PCTL_AUTH_ACCESS_TTL_MINUTES=480
+PCTL_AUTH_RATE_LIMIT_WINDOW_SECONDS=300
+PCTL_AUTH_RATE_LIMIT_MAX_ATTEMPTS=10
+PCTL_AUTH_SUSPICIOUS_THRESHOLD=5
+PCTL_AUTH_PASSWORD_ITERATIONS=600000
+PCTL_AUTH_PASSWORD_PEPPER=
+```
+
+`superadmin` создаётся/обновляется на старте приложения из этих env.
+
+## Docker Compose
+
+В `docker-compose.yml` уже нужно задавать пароль superadmin через env `core-api` сервиса.
+
+Минимальный пример:
 
 ```yaml
-servers:
-  lifeorient:
-    sshHost: lifeorient
-    commandTimeoutSeconds: 120
-    idleDisconnectSeconds: 300
+environment:
+  PCTL_SUPERADMIN_EMAIL: superadmin@local
+  PCTL_SUPERADMIN_USERNAME: superadmin
+  PCTL_SUPERADMIN_PASSWORD: change-me-now
 ```
 
 ## Локальный запуск
-
-Поднять всё локально:
 
 ```bash
 bash scripts/up.sh
 ```
 
-Это делает:
-
-- прогон тестов
-- `docker compose up -d --build mysql core-api adminer`
-- установку launcher в `/usr/local/bin/pctl`
-
-Проверка health:
+Health:
 
 ```bash
 curl -sS http://127.0.0.1:8080/health
+```
+
+UI:
+
+```text
+http://127.0.0.1:8081
 ```
 
 Adminer:
@@ -100,41 +149,17 @@ Adminer:
 http://127.0.0.1:8088
 ```
 
-## Локальные сервисы и volume
+## Примеры auth API
 
-В `docker-compose.yml`:
-
-- MySQL data: `./mysql-data`
-- app logs: `./api-logs`
-
-Логи команд лежат так:
-
-```text
-./api-logs/jobs/<server>/<request_id>/stdout.log
-./api-logs/jobs/<server>/<request_id>/stderr.log
-```
-
-Audit JSONL:
-
-```text
-./api-logs/audit/audit.jsonl
-```
-
-## Авторизация
-
-Теперь основной auth-flow для UI такой:
-
-1. UI вызывает `POST /api/v1/auth/token` c `email`.
-2. Если пользователь с таким email есть в таблице `users`, API возвращает Bearer token.
-3. UI использует этот token в `Authorization: Bearer <token>` для HTTP API и websocket.
-4. UI может проверить текущего пользователя через `GET /api/v1/auth/me`.
-5. UI может инвалидировать выданный токен через `POST /api/v1/auth/logout`.
-
-Пример получения токена по email:
+### Логин по email/password
 
 ```bash
-curl -sS -X POST   -H 'Content-Type: application/json'   http://127.0.0.1:8080/api/v1/auth/token   -d '{
-    "email": "maksim.nikitin@flant.com"
+curl -sS -X POST \
+  -H 'Content-Type: application/json' \
+  http://127.0.0.1:8080/api/v1/auth/token \
+  -d '{
+    "email": "superadmin@local",
+    "password": "change-me-now"
   }'
 ```
 
@@ -144,241 +169,162 @@ curl -sS -X POST   -H 'Content-Type: application/json'   http://127.0.0.1:8080/a
 {
   "ok": true,
   "token_type": "Bearer",
-  "access_token": "<issued-token>",
+  "access_token": "<opaque-session-token>",
+  "expires_at": "2026-06-07T20:00:00+00:00",
+  "session": {
+    "id": 7,
+    "session_uid": "8a0f...",
+    "user_id": 1,
+    "created_at": "2026-06-07T12:00:00+00:00",
+    "expires_at": "2026-06-07T20:00:00+00:00",
+    "last_used_at": "2026-06-07T12:00:00+00:00",
+    "revoked_at": null,
+    "revoked_reason": null,
+    "ip_address": "127.0.0.1",
+    "user_agent": "Mozilla/..."
+  },
   "user": {
     "id": 1,
-    "username": "maksim.nikitin",
-    "email": "maksim.nikitin@flant.com",
-    "role": "admin"
+    "username": "superadmin",
+    "email": "superadmin@local",
+    "role": "superadmin",
+    "team_id": null,
+    "team_name": null,
+    "permissions": [
+      "audit:read_all",
+      "auth:revoke_any_session",
+      "auth:view_all_sessions",
+      "jobs:read_all",
+      "servers:manage",
+      "servers:read_all",
+      "teams:manage",
+      "teams:read_all",
+      "users:manage"
+    ]
   }
 }
 ```
 
-Проверить текущего пользователя:
+### Проверить текущего пользователя
 
 ```bash
-curl -sS   -H 'Authorization: Bearer <issued-token>'   http://127.0.0.1:8080/api/v1/auth/me
+curl -sS \
+  -H 'Authorization: Bearer <token>' \
+  http://127.0.0.1:8080/api/v1/auth/me
 ```
 
-Разлогиниться и инвалидировать текущий выданный токен:
+### Разлогинить только текущую сессию
 
 ```bash
-curl -sS -X POST   -H 'Authorization: Bearer <issued-token>'   http://127.0.0.1:8080/api/v1/auth/logout
+curl -sS -X POST \
+  -H 'Authorization: Bearer <token>' \
+  http://127.0.0.1:8080/api/v1/auth/logout
 ```
 
-Статический token из `PCTL_API_TOKEN` всё ещё поддерживается как bootstrap/fallback для CLI и локальной отладки:
+### Разлогинить все свои сессии
 
-```text
-dev-local-token-change-me
+```bash
+curl -sS -X POST \
+  -H 'Authorization: Bearer <token>' \
+  http://127.0.0.1:8080/api/v1/auth/logout-all
 ```
 
-## Share link и браузер
+### Посмотреть auth sessions
+
+```bash
+curl -sS \
+  -H 'Authorization: Bearer <token>' \
+  http://127.0.0.1:8080/api/v1/auth/sessions
+```
+
+### Сменить пароль и сразу ротировать текущую сессию
+
+```bash
+curl -sS -X POST \
+  -H 'Authorization: Bearer <token>' \
+  -H 'Content-Type: application/json' \
+  http://127.0.0.1:8080/api/v1/auth/password \
+  -d '{
+    "current_password": "change-me-now",
+    "new_password": "even-stronger-password"
+  }'
+```
+
+## CRUD API
+
+Superadmin-only CRUD:
+
+- `GET/POST/PATCH/DELETE /api/v1/users`
+- `GET/POST/PATCH/DELETE /api/v1/teams`
+- `GET/POST/PATCH/DELETE /api/v1/admin/servers`
+- `GET/POST/PATCH/DELETE /api/v1/proxies`
+- `GET/POST/PATCH/DELETE /api/v1/actions`
+- `GET/POST/PATCH/DELETE /api/v1/tokens`
+
+При создании/обновлении пользователя можно передать локальный password:
+
+```bash
+curl -sS -X POST \
+  -H 'Authorization: Bearer <superadmin-token>' \
+  -H 'Content-Type: application/json' \
+  http://127.0.0.1:8080/api/v1/users \
+  -d '{
+    "username": "alice",
+    "email": "alice@example.com",
+    "role": "engineer",
+    "team_id": 1,
+    "password": "alice-local-password",
+    "is_active": true
+  }'
+```
+
+Если superadmin меняет пользователю password, его активные auth sessions автоматически отзываются.
+
+## Server и session visibility
+
+- `GET /api/v1/servers` — scoped list серверов для текущего пользователя
+- `GET /api/v1/sessions` — scoped history command sessions
+- `GET /api/v1/sessions/{request_id}` — scoped detail + stdout/stderr
+- `DELETE /api/v1/sessions/{request_id}` — soft-delete из History UI, запись остаётся в БД
+- `GET /api/v1/running` — scoped running commands
+- `GET /api/v1/ssh/status` — scoped SSH status
+
+## UI
+
+Фронтенд находится в соседнем репозитории `../ai-proxy-web`.
+
+Сейчас есть два основных view:
+
+- `superadmin` view: все команды, все серверы, history, auth sessions, audit
+- `engineer` view: только серверы своей команды и history своей команды
+
+История в UI изменена:
+
+- слева панели с датой открытия/закрытия
+- справа описание и лог выбранной сессии
+- вместо `completed 0` есть кнопка удаления сессии из History
+- `Open in Stream` убран из History и остался только в `Stream`
+
+## Share link и websocket
 
 После `POST /api/v1/exec` сервис возвращает:
 
 - `ws_path` — websocket для авторизованного клиента
-- `share_ws_path` — websocket с `share_token`, который можно передать другому человеку
+- `share_ws_path` — websocket с `share_token`
 
-Пример `share_ws_path`:
+Пример:
 
 ```text
 /ws?stream_id=<id>&share_token=<token>
 ```
 
-Важно:
+`share_token` даёт доступ только к конкретному stream. Обычный Bearer token дополнительно проверяется по role/team scope.
 
-- это именно websocket endpoint, а не HTML-страница
-- открыть его в адресной строке браузера как обычную ссылку недостаточно
-- для просмотра нужен клиент, который умеет подключаться к websocket и рисовать поток на странице
-- таким клиентом может быть UI, отдельная HTML-страница с JavaScript или даже ручное подключение из DevTools
+## Проверка изменений
 
-## CRUD API
-
-CRUD вынесен в отдельные пакеты:
-
-- `app/api/crud/routes/`
-- `app/api/crud/schemas/`
-
-Поддерживаемые сущности:
-
-- `users`
-- `proxies`
-- `servers`
-- `actions`
-- `tokens`
-
-Схема маршрутов для каждой сущности одинаковая:
-
-- `GET /api/v1/<entity>`
-- `GET /api/v1/<entity>/{id}`
-- `POST /api/v1/<entity>`
-- `PATCH /api/v1/<entity>/{id}`
-- `DELETE /api/v1/<entity>/{id}`
-
-Примеры:
-
-Создать пользователя:
+Проверялось так:
 
 ```bash
-curl -sS -X POST   -H 'Authorization: Bearer dev-local-token-change-me'   -H 'Content-Type: application/json'   http://127.0.0.1:8080/api/v1/users   -d '{
-    "username": "john.doe",
-    "email": "john.doe@example.com",
-    "role": "admin"
-  }'
-```
-
-Получить список серверов:
-
-```bash
-curl -sS   -H 'Authorization: Bearer dev-local-token-change-me'   http://127.0.0.1:8080/api/v1/servers
-```
-
-Обновить proxy:
-
-```bash
-curl -sS -X PATCH   -H 'Authorization: Bearer dev-local-token-change-me'   -H 'Content-Type: application/json'   http://127.0.0.1:8080/api/v1/proxies/1   -d '{
-    "proxy": "bastion-1"
-  }'
-```
-
-Создать token:
-
-```bash
-curl -sS -X POST   -H 'Authorization: Bearer dev-local-token-change-me'   -H 'Content-Type: application/json'   http://127.0.0.1:8080/api/v1/tokens   -d '{
-    "name": "cli-user-1",
-    "token": "super-secret-token",
-    "enabled": true
-  }'
-```
-
-## SSH connection status
-
-SSH-соединение к серверу не закрывается сразу после каждой команды.
-
-Сейчас поведение такое:
-
-- при первой команде создаётся SSH connection
-- следующие команды на тот же сервер переиспользуют его
-- после завершения последней команды соединение держится idle ещё `idleDisconnectSeconds`
-- по умолчанию это `300` секунд, то есть 5 минут
-- если в этот период приходит новая команда, idle-close отменяется и соединение используется повторно
-
-Проверить текущее состояние SSH-соединений:
-
-```bash
-pctl ssh-status
-```
-
-Или через curl:
-
-```bash
-curl -sS \
-  -H 'Authorization: Bearer dev-local-token-change-me' \
-  http://127.0.0.1:8080/api/v1/ssh/status
-```
-
-Пример ответа:
-
-```json
-{
-  "ok": true,
-  "connections": [
-    {
-      "server": "lifeorient",
-      "ssh_host": "lifeorient",
-      "connected": true,
-      "active_commands": 0,
-      "connected_at": "2026-06-06T02:20:00+00:00",
-      "last_used_at": "2026-06-06T02:21:15+00:00",
-      "idle_disconnect_at": "2026-06-06T02:26:15+00:00",
-      "idle_disconnect_in_seconds": 297,
-      "idle_disconnect_seconds": 300,
-      "command_timeout_seconds": 120
-    }
-  ]
-}
-```
-
-Полезный сценарий проверки reuse:
-
-1. Выполнить любую команду через `pctl exec` или `POST /api/v1/exec`.
-2. Сразу вызвать `GET /api/v1/ssh/status`.
-3. Убедиться, что `connected=true`, а `idle_disconnect_in_seconds` уменьшается.
-4. Запустить ещё одну команду до истечения idle-таймера и убедиться, что соединение не создаётся заново, а `last_used_at` обновляется.
-
-## Policy и сервер
-
-Сервер для выполнения указывается явно:
-
-```json
-{
-  "server": "lifeorient"
-}
-```
-
-В `pctl` сервер выбирается по приоритету:
-
-1. `--server`
-2. `PCTL_SERVER`
-3. `pctl switch <server>`
-4. `PCTL_DEFAULT_SSH_HOST`
-5. `PCTL_DEFAULT_SERVER`
-
-## Тестовые curl-запросы
-
-Выполнить `date`:
-
-```bash
-curl -sS -X POST   -H 'Authorization: Bearer dev-local-token-change-me'   -H 'Content-Type: application/json'   http://127.0.0.1:8080/api/v1/exec   -d '{
-    "request_id": "test-date-1",
-    "server": "lifeorient",
-    "argv": ["date"],
-    "client_type": "CLI"
-  }'
-```
-
-Проверить, можно ли команду выполнить:
-
-```bash
-curl -sS -X POST   -H 'Authorization: Bearer dev-local-token-change-me'   -H 'Content-Type: application/json'   http://127.0.0.1:8080/api/v1/can-i   -d '{
-    "server": "lifeorient",
-    "argv": ["tail", "-f", "/root/test.txt"]
-  }'
-```
-
-Запустить `sleep 100`:
-
-```bash
-curl -sS -X POST   -H 'Authorization: Bearer dev-local-token-change-me'   -H 'Content-Type: application/json'   http://127.0.0.1:8080/api/v1/exec   -d '{
-    "request_id": "sleep-test-1",
-    "server": "lifeorient",
-    "argv": ["sleep", "100"],
-    "client_type": "CLI"
-  }'
-```
-
-Отменить команду:
-
-```bash
-curl -sS -X POST   -H 'Authorization: Bearer dev-local-token-change-me'   -H 'Content-Type: application/json'   http://127.0.0.1:8080/api/v1/cancel   -d '{"request_id":"sleep-test-1"}'
-```
-
-Проверить jobs:
-
-```bash
-curl -sS   -H 'Authorization: Bearer dev-local-token-change-me'   http://127.0.0.1:8080/api/v1/jobs
-```
-
-Проверить audit:
-
-```bash
-curl -sS   -H 'Authorization: Bearer dev-local-token-change-me'   http://127.0.0.1:8080/api/v1/audit
-```
-
-## Тестовые команды pctl
-
-Выполнить `date`:
-
-```bash
-PCTL_API_TOKEN=dev-local-token-change-me pctl --server lifeorient exec -- date
+docker compose run --rm pctl-tests
+cd ../ai-proxy-web && npm run build
 ```
