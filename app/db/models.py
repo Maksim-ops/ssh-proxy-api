@@ -67,6 +67,7 @@ class Server(Base):
     project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id"), nullable=True)
     port: Mapped[int] = mapped_column(Integer, nullable=False, default=22)
     environment: Mapped[str] = mapped_column(String(64), nullable=False, default="dev")
+    server_type: Mapped[str | None] = mapped_column("type", String(64), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 

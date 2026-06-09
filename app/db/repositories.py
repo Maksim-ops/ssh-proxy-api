@@ -82,6 +82,7 @@ def _serialize_server(item: Server, team: Team | None = None, project: Project |
         "project_name": project.name if project else None,
         "port": item.port,
         "environment": item.environment,
+        "type": item.server_type,
         "enabled": item.enabled,
         "created_at": item.created_at.isoformat() if item.created_at else None,
     }

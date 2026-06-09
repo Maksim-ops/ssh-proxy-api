@@ -145,6 +145,7 @@ def _run_schema_migrations() -> None:
 
         _add_column_if_missing(conn, table_name="servers", column_name="team_id", definition="`team_id` INT NULL")
         _add_column_if_missing(conn, table_name="servers", column_name="project_id", definition="`project_id` INT NULL")
+        _add_column_if_missing(conn, table_name="servers", column_name="type", definition="`type` VARCHAR(64) NULL")
 
         _add_column_if_missing(conn, table_name="jobs", column_name="auth_session_id", definition="`auth_session_id` INT NULL")
         _add_column_if_missing(conn, table_name="jobs", column_name="hidden_at", definition="`hidden_at` TIMESTAMP NULL DEFAULT NULL")

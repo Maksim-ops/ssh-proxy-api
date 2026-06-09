@@ -99,6 +99,7 @@ def _serialize_server(item: Server, team: Team | None = None, project: Project |
         "project_name": project.name if project else None,
         "port": item.port,
         "environment": item.environment,
+        "type": item.server_type,
         "enabled": item.enabled,
         "created_at": _dt(item.created_at),
     }
@@ -430,7 +431,7 @@ def create_server(data: dict[str, Any]) -> dict[str, Any]:
     session = get_session_factory()()
     try:
         data["team_id"] = _resolve_project_team_id(session, data.get("project_id"), data.get("team_id"))
-        item = Server(**data)
+        item = Server(**{"server_type" if key == "type" else key: value for key, value in data.items()})
         session.add(item)
         _commit(session)
         session.refresh(item)
@@ -452,7 +453,7 @@ def update_server(server_id: int, data: dict[str, Any]) -> dict[str, Any]:
         merged_team_id = data.get("team_id", item.team_id)
         resolved_team_id = _resolve_project_team_id(session, merged_project_id, merged_team_id)
         for key, value in data.items():
-            setattr(item, key, value)
+            setattr(item, "server_type" if key == "type" else key, value)
         item.team_id = resolved_team_id
         _commit(session)
         session.refresh(item)

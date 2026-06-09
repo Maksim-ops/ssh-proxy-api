@@ -14,6 +14,7 @@ class ServerCreate(BaseModel):
     project_id: int | None = None
     port: int = 22
     environment: str = "dev"
+    type: str | None = None
     enabled: bool = True
 
 
@@ -26,6 +27,7 @@ class ServerUpdate(BaseModel):
     project_id: int | None = None
     port: int | None = None
     environment: str | None = None
+    type: str | None = None
     enabled: bool | None = None
 
 
@@ -44,5 +46,6 @@ class ServerResponse(BaseModel):
     project_name: str | None = None
     port: int
     environment: str
+    type: str | None = None
     enabled: bool
     created_at: datetime

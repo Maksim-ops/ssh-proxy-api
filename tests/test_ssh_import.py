@@ -1,4 +1,4 @@
-from app.bootstrap.ssh_import import _parse_ssh_config
+from app.bootstrap.ssh_import import _derive_team_and_project, _parse_ssh_config
 
 
 def test_parse_ssh_config_after_marker_with_proxy_command_and_proxy_jump():
@@ -33,3 +33,12 @@ Host omnidesk.gitlab
             "proxy_alias": "omnidesk.sel-hv-03",
         },
     ]
+
+
+def test_regular_hosts_stay_in_alfa_team_and_use_first_alias_part_as_project():
+    assert _derive_team_and_project("omnidesk.gitlab") == ("alfa", "omnidesk")
+    assert _derive_team_and_project("cache01.internal") == ("alfa", "cache01")
+
+
+def test_explicit_team_alias_still_preserves_team_prefix():
+    assert _derive_team_and_project("team-beta.demo-gitlab-runner") == ("beta", "demo-gitlab-runner")
